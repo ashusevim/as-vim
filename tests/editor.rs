@@ -87,7 +87,7 @@ fn insert_types_characters_at_cursor() {
     }
     assert_eq!(text(&e), "abc");
     assert_eq!(e.cx, 3);
-    assert!(e.dirty);
+    assert!(e.dirty());
 }
 
 #[test]
@@ -223,7 +223,7 @@ fn x_deletes_char_at_cursor() {
     let mut e = ed_with("abc");
     e.handle_input(Input::Char('x'));
     assert_eq!(text(&e), "bc");
-    assert!(e.dirty);
+    assert!(e.dirty());
 }
 
 #[test]
@@ -382,7 +382,7 @@ fn wq_saves_then_quits() {
     }
     assert_eq!(e.handle_input(Input::Enter), Effect::Quit);
     assert_eq!(std::fs::read_to_string(&p).unwrap(), "saved\n");
-    assert!(!e.dirty);
+    assert!(!e.dirty());
 }
 
 #[test]
@@ -400,7 +400,7 @@ fn w_writes_buffer_with_trailing_newline() {
     let effect = e.handle_input(Input::Enter);
     assert!(matches!(effect, Effect::Saved(_)));
     assert_eq!(std::fs::read_to_string(&p).unwrap(), "one\ntwo\n");
-    assert!(!e.dirty);
+    assert!(!e.dirty());
 }
 
 #[test]
@@ -435,11 +435,11 @@ fn saving_clears_dirty_flag() {
     feed(&mut e, &[Input::Char('i')]);
     e.handle_input(Input::Char('t'));
     e.handle_input(Input::Esc);
-    assert!(e.dirty);
+    assert!(e.dirty());
     e.handle_input(Input::Char(':'));
     e.handle_input(Input::Char('w'));
     e.handle_input(Input::Enter);
-    assert!(!e.dirty);
+    assert!(!e.dirty());
     // :q now quits cleanly
     e.handle_input(Input::Char(':'));
     e.handle_input(Input::Char('q'));
@@ -486,4 +486,408 @@ fn horizontal_scroll_follows_cursor() {
     e.update_scroll();
     let col = display_col(&e.lines[0], e.cx);
     assert!(col >= e.col_off && col < e.col_off + e.screen_cols);
+}
+
+// ----------------------------------------------------------------------
+// v0.2 — Undo / redo
+// ----------------------------------------------------------------------
+
+#[test]
+fn undo_removes_last_insert() {
+    let mut e = ed();
+    feed(&mut e, &[Input::Char('i')]);
+    for c in "hello".chars() {
+        e.handle_input(Input::Char(c));
+    }
+    e.handle_input(Input::Esc);
+    e.handle_input(Input::Char('u'));
+    assert_eq!(text(&e), "");
+    assert!(!e.dirty());
+}
+
+#[test]
+fn consecutive_typing_coalesces_into_one_undo() {
+    let mut e = ed();
+    feed(&mut e, &[Input::Char('i')]);
+    for c in "abc".chars() {
+        e.handle_input(Input::Char(c));
+    }
+    e.handle_input(Input::Esc);
+    e.handle_input(Input::Char('u'));
+    assert_eq!(text(&e), ""); // one undo clears all of "abc"
+}
+
+#[test]
+fn cursor_movement_breaks_insert_coalescing() {
+    let mut e = ed();
+    feed(&mut e, &[Input::Char('i')]);
+    for c in "ab".chars() {
+        e.handle_input(Input::Char(c));
+    }
+    e.handle_input(Input::ArrowLeft); // move between a and b
+    e.handle_input(Input::Char('X'));
+    e.handle_input(Input::Esc);
+    e.handle_input(Input::Char('u'));
+    assert_eq!(text(&e), "ab"); // only "X" undone
+    e.handle_input(Input::Char('u'));
+    assert_eq!(text(&e), "");
+}
+
+#[test]
+fn undo_and_redo_enter_split_roundtrip() {
+    let mut e = ed_with("hello");
+    feed(
+        &mut e,
+        &[Input::Char('l'), Input::Char('l'), Input::Char('i')],
+    );
+    e.handle_input(Input::Enter);
+    assert_eq!(text(&e), "he\nllo");
+    e.handle_input(Input::Esc);
+    e.handle_input(Input::Char('u'));
+    assert_eq!(text(&e), "hello");
+    e.handle_input(Input::Ctrl('r'));
+    assert_eq!(text(&e), "he\nllo");
+}
+
+#[test]
+fn undo_backspace_join_restores_the_line() {
+    let mut e = ed_with("ab\ncd");
+    feed(
+        &mut e,
+        &[Input::Char('j'), Input::Char('i'), Input::Backspace],
+    );
+    assert_eq!(text(&e), "abcd");
+    e.handle_input(Input::Esc);
+    e.handle_input(Input::Char('u'));
+    assert_eq!(text(&e), "ab\ncd");
+}
+
+#[test]
+fn undo_dd_restores_deleted_line() {
+    let mut e = ed_with("a\nb\nc");
+    feed(&mut e, &[Input::Char('d'), Input::Char('d')]);
+    assert_eq!(text(&e), "b\nc");
+    e.handle_input(Input::Char('u'));
+    assert_eq!(text(&e), "a\nb\nc");
+    assert_eq!((e.cy, e.cx), (0, 0)); // cursor restored to before the dd
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn undo_o_and_O() {
+    let mut e = ed_with("mid");
+    e.handle_input(Input::Char('o'));
+    e.handle_input(Input::Char('z'));
+    e.handle_input(Input::Esc);
+    e.handle_input(Input::Char('u'));
+    assert_eq!(text(&e), "mid");
+    // redo: reopens the line, cursor at its start (vim behaviour)
+    e.handle_input(Input::Ctrl('r'));
+    assert_eq!(text(&e), "mid\nz");
+    assert_eq!((e.cy, e.cx), (1, 0));
+
+    let mut e2 = ed_with("mid");
+    e2.handle_input(Input::Char('O'));
+    e2.handle_input(Input::Char('q'));
+    e2.handle_input(Input::Esc);
+    e2.handle_input(Input::Char('u'));
+    assert_eq!(text(&e2), "mid");
+    e2.handle_input(Input::Ctrl('r'));
+    assert_eq!(text(&e2), "q\nmid");
+    assert_eq!(e2.cy, 0);
+}
+
+#[test]
+fn undo_x_restores_char() {
+    let mut e = ed_with("abc");
+    e.handle_input(Input::Char('x'));
+    assert_eq!(text(&e), "bc");
+    e.handle_input(Input::Char('u'));
+    assert_eq!(text(&e), "abc");
+}
+
+#[test]
+fn redo_is_cleared_by_a_new_edit() {
+    let mut e = ed_with("a");
+    feed(&mut e, &[Input::Char('i'), Input::Char('b')]); // "ba"
+    e.handle_input(Input::Esc);
+    e.handle_input(Input::Char('u'));
+    assert_eq!(text(&e), "a");
+    feed(&mut e, &[Input::Char('i'), Input::Char('c')]); // "ca"
+    e.handle_input(Input::Esc);
+    // redo must do nothing now — the edit after undo cleared it
+    e.handle_input(Input::Ctrl('r'));
+    assert_eq!(text(&e), "ca");
+    assert!(e.status.contains("newest") || e.status.contains("Redid"));
+}
+
+#[test]
+fn undo_at_start_and_redo_at_end_report_status() {
+    let mut e = ed_with("a");
+    e.handle_input(Input::Char('u'));
+    assert!(e.status.contains("oldest"));
+    e.handle_input(Input::Ctrl('r'));
+    assert!(e.status.contains("newest"));
+}
+
+#[test]
+fn undoing_back_to_saved_state_clears_dirty() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("u.txt");
+    let mut e = Editor::open(&p, 24, 80).unwrap();
+    feed(&mut e, &[Input::Char('i'), Input::Char('x')]);
+    e.handle_input(Input::Esc);
+    assert!(e.dirty());
+    e.handle_input(Input::Char(':'));
+    e.handle_input(Input::Char('w'));
+    e.handle_input(Input::Enter);
+    assert!(!e.dirty()); // just saved
+    feed(&mut e, &[Input::Char('i'), Input::Char('y')]);
+    e.handle_input(Input::Esc);
+    assert!(e.dirty());
+    // continue typing after the save — still dirty (y+z coalesce into one tx)
+    feed(&mut e, &[Input::Char('i'), Input::Char('z')]);
+    e.handle_input(Input::Esc);
+    assert!(e.dirty());
+    e.handle_input(Input::Char('u')); // one undo removes the y+z session
+    assert!(!e.dirty()); // exactly back to the saved state
+    assert_eq!(text(&e), "x");
+    e.handle_input(Input::Char('u')); // past the saved state -> dirty again
+    assert!(e.dirty());
+    assert_eq!(text(&e), "");
+    e.handle_input(Input::Ctrl('r')); // redo returns to the saved state
+    assert!(!e.dirty());
+    assert_eq!(text(&e), "x");
+}
+
+#[test]
+fn undo_and_redo_commands_work() {
+    let mut e = ed_with("a");
+    feed(&mut e, &[Input::Char('i'), Input::Char('b')]);
+    e.handle_input(Input::Esc);
+    e.handle_input(Input::Char(':'));
+    for c in "undo".chars() {
+        e.handle_input(Input::Char(c));
+    }
+    e.handle_input(Input::Enter);
+    assert_eq!(text(&e), "a");
+    e.handle_input(Input::Char(':'));
+    for c in "redo".chars() {
+        e.handle_input(Input::Char(c));
+    }
+    e.handle_input(Input::Enter);
+    assert_eq!(text(&e), "ba");
+}
+
+// ----------------------------------------------------------------------
+// v0.2 — Search
+// ----------------------------------------------------------------------
+
+#[test]
+fn search_jumps_to_next_match_and_wraps() {
+    let mut e = ed_with("one two\nthree two\nfour");
+    e.handle_input(Input::Char('/'));
+    assert_eq!(e.mode, Mode::Search);
+    for c in "two".chars() {
+        e.handle_input(Input::Char(c));
+    }
+    e.handle_input(Input::Enter);
+    assert_eq!((e.cy, e.cx), (0, 4));
+    e.handle_input(Input::Char('n')); // next: line 1
+    assert_eq!((e.cy, e.cx), (1, 6));
+    e.handle_input(Input::Char('n')); // wraps to line 0
+    assert_eq!((e.cy, e.cx), (0, 4));
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn capital_N_searches_backwards() {
+    let mut e = ed_with("aa\naa");
+    feed(&mut e, &[Input::Char('j'), Input::Char('l')]);
+    e.handle_input(Input::Char('/'));
+    for c in "aa".chars() {
+        e.handle_input(Input::Char(c));
+    }
+    e.handle_input(Input::Enter); // from (1,1): next "aa" wraps to (0,0)
+    assert_eq!((e.cy, e.cx), (0, 0));
+    e.handle_input(Input::Char('N')); // backwards: (1,0)
+    assert_eq!((e.cy, e.cx), (1, 0));
+}
+
+#[test]
+fn search_esc_cancels_but_keeps_last_search_for_n() {
+    let mut e = ed_with("abc abc");
+    e.handle_input(Input::Char('/'));
+    for c in "abc".chars() {
+        e.handle_input(Input::Char(c));
+    }
+    e.handle_input(Input::Esc);
+    assert_eq!(e.mode, Mode::Normal);
+    // last search was never executed; n reports no previous search
+    e.handle_input(Input::Char('n'));
+    assert!(e.status.contains("No previous search"));
+}
+
+#[test]
+fn search_no_match_reports_not_found() {
+    let mut e = ed_with("hello");
+    e.handle_input(Input::Char('/'));
+    for c in "zzz".chars() {
+        e.handle_input(Input::Char(c));
+    }
+    e.handle_input(Input::Enter);
+    assert!(e.status.contains("Pattern not found"));
+    assert_eq!((e.cy, e.cx), (0, 0));
+}
+
+#[test]
+fn search_is_smartcase() {
+    // all-lowercase term: case-insensitive
+    assert_eq!(
+        Editor::find_matches(&"Hello HELLO".chars().collect::<Vec<_>>(), "hello"),
+        vec![0, 6]
+    );
+    // term with uppercase: case-sensitive
+    assert_eq!(
+        Editor::find_matches(&"Hello HELLO".chars().collect::<Vec<_>>(), "HELLO"),
+        vec![6]
+    );
+}
+
+#[test]
+fn find_matches_handles_empty_and_short() {
+    assert!(Editor::find_matches(&"abc".chars().collect::<Vec<_>>(), "").is_empty());
+    assert!(Editor::find_matches(&"a".chars().collect::<Vec<_>>(), "abc").is_empty());
+    assert_eq!(
+        Editor::find_matches(&"aaa".chars().collect::<Vec<_>>(), "aa"),
+        vec![0]
+    ); // non-overlapping
+}
+
+#[test]
+fn search_ranges_feed_highlighting() {
+    let mut e = ed_with("cat catalog");
+    e.handle_input(Input::Char('/'));
+    for c in "cat".chars() {
+        e.handle_input(Input::Char(c));
+    }
+    e.handle_input(Input::Enter);
+    assert_eq!(e.search_ranges(0), vec![(0, 3), (4, 7)]);
+    // untouched lines have no ranges
+    e.lines.push("dog".chars().collect());
+    assert!(e.search_ranges(1).is_empty());
+}
+
+#[test]
+fn search_term_incremental_backspace() {
+    let mut e = ed_with("target");
+    e.handle_input(Input::Char('/'));
+    for c in "tarx".chars() {
+        e.handle_input(Input::Char(c));
+    }
+    e.handle_input(Input::Backspace);
+    assert_eq!(e.search_term, "tar");
+    e.handle_input(Input::Enter);
+    assert_eq!((e.cy, e.cx), (0, 0));
+}
+
+// ----------------------------------------------------------------------
+// v0.2 — Yank / paste / OSC 52 clipboard
+// ----------------------------------------------------------------------
+
+#[test]
+fn yy_p_pastes_line_below_and_is_undoable() {
+    let mut e = ed_with("one\ntwo");
+    feed(
+        &mut e,
+        &[
+            Input::Char('j'),
+            Input::Char('y'),
+            Input::Char('y'),
+            Input::Char('p'),
+        ],
+    );
+    assert_eq!(text(&e), "one\ntwo\ntwo");
+    assert_eq!(e.cy, 2);
+    e.handle_input(Input::Esc);
+    e.handle_input(Input::Char('u'));
+    assert_eq!(text(&e), "one\ntwo");
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn capital_P_pastes_line_above() {
+    let mut e = ed_with("one\ntwo");
+    feed(
+        &mut e,
+        &[
+            Input::Char('j'),
+            Input::Char('y'),
+            Input::Char('y'),
+            Input::Char('P'),
+        ],
+    );
+    assert_eq!(text(&e), "one\ntwo\ntwo");
+    assert_eq!(e.cy, 1); // pasted line takes position 1
+}
+
+#[test]
+fn x_then_p_pastes_char_after_cursor() {
+    let mut e = ed_with("abc");
+    e.handle_input(Input::Char('x')); // deletes 'a', register = "a"
+    e.handle_input(Input::Char('p')); // pastes after cursor char -> "bac"
+    assert_eq!(text(&e), "bac");
+    e.handle_input(Input::Esc);
+    e.handle_input(Input::Char('u'));
+    assert_eq!(text(&e), "bc");
+}
+
+#[test]
+fn dd_yanks_the_line_into_the_register() {
+    let mut e = ed_with("kill\nkeep");
+    e.handle_input(Input::Char('d'));
+    e.handle_input(Input::Char('d'));
+    assert_eq!(text(&e), "keep");
+    e.handle_input(Input::Char('p'));
+    assert_eq!(text(&e), "keep\nkill");
+}
+
+#[test]
+fn paste_with_empty_register_is_a_noop_with_message() {
+    let mut e = ed_with("abc");
+    e.handle_input(Input::Char('p'));
+    assert_eq!(text(&e), "abc");
+    assert!(e.status.contains("Nothing to paste"));
+}
+
+#[test]
+fn take_clipboard_returns_and_clears_pending() {
+    let mut e = ed_with("data");
+    e.handle_input(Input::Char('y'));
+    e.handle_input(Input::Char('y'));
+    let clip = e.take_clipboard();
+    assert_eq!(clip.as_deref(), Some("data"));
+    assert!(e.take_clipboard().is_none());
+}
+
+#[test]
+fn base64_encode_matches_known_vectors() {
+    use as_vim::editor::base64_encode;
+    assert_eq!(base64_encode(b""), "");
+    assert_eq!(base64_encode(b"f"), "Zg==");
+    assert_eq!(base64_encode(b"fo"), "Zm8=");
+    assert_eq!(base64_encode(b"foo"), "Zm9v");
+    assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
+    assert_eq!(
+        base64_encode(b"any carnal pleasure."),
+        "YW55IGNhcm5hbCBwbGVhc3VyZS4="
+    );
+}
+
+#[test]
+fn yank_clipboard_skips_huge_payloads() {
+    let mut e = ed_with(&"x".repeat(150_000));
+    e.handle_input(Input::Char('y'));
+    e.handle_input(Input::Char('y'));
+    assert!(e.take_clipboard().is_none()); // > 100 KB cap
 }
