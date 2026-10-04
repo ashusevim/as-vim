@@ -58,10 +58,12 @@ jobs:
             cp "target/${TARGET}/release/as-vim.exe" "$NAME/"
             cp README.md LICENSE "$NAME/"
             7z a "${NAME}.zip" "$NAME"
+            7z a "as-vim-${TARGET}.zip" "$NAME"
           else
             cp "target/${TARGET}/release/as-vim" "$NAME/"
             cp README.md LICENSE "$NAME/"
             tar czf "${NAME}.tar.gz" "$NAME"
+            tar czf "as-vim-${TARGET}.tar.gz" "$NAME"
           fi
       - name: Upload to release
         uses: softprops/action-gh-release@v2
