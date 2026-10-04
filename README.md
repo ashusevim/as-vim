@@ -1,141 +1,114 @@
-# as-nano
+# as-vim
 
-Minimal modal terminal text editor (Vim‑inspired) written in TypeScript / Node.js. Opens a file into a line buffer, lets you navigate, edit, and write back to disk using a tiny, hackable codebase.
+A minimal, fast, vim-inspired terminal text editor — one tiny, hackable Rust codebase, one static binary.
+
+> The original was written in TypeScript (`legacy/`); as-vim is the Rust rewrite with a
+> single-binary distribution, scrolling, and a dirty-state guard.
+
+## Features
+
+- **Modal editing** — NORMAL / INSERT / COMMAND, vim-style
+- **Motions** — `h j k l`, arrow keys, `0`, `$`, `gg`, `G`, `PageUp`/`PageDown`
+- **Editing** — `i` `a` `A` `o` `O`, `x`, `dd`, full multi-byte (emoji, CJK) safety
+- **Ex commands** — `:w`, `:w <file>`, `:q`, `:q!`, `:wq`, `:x`
+- **Safe defaults** — `:q` refuses to discard unsaved changes; dirty indicator `[+]` in the status bar
+- **Scrolling** — files bigger than the viewport scroll vertically *and* horizontally
+- **Resize-aware** — reflows when you resize the terminal
+- **Unicode correct** — wide characters and tabs render and cursor-track properly
 
 ## Install
 
-```bash
-git clone <repo-url>
-cd as-nano
-npm install
-npm run build   # if a build step is added later; currently source can run directly
-npm link        # optional: exposes the CLI globally as `as-nano`
-```
-
-## Run
+### From crates.io
 
 ```bash
-# Open (or create) a file
-as-nano notes.txt
-
-# Or with node directly (dev mode)
-node src/index.ts notes.txt
+cargo install as-vim
 ```
 
-If no filename is provided it starts with an empty unnamed buffer.
+### Prebuilt binaries
 
-## Modes
+Grab a static binary for Linux (x86_64/aarch64), macOS (Intel/Apple Silicon), or Windows from the
+[releases page](https://github.com/ashusevim/as-vim/releases):
 
-| Mode | Enter | Exit | Purpose |
-|------|-------|------|---------|
-| NORMAL | (startup) | `i`, `:` (to switch) | Navigation / high-level commands |
-| INSERT | `i` from NORMAL | `Esc` | Text entry / editing |
-| COMMAND | `:` from NORMAL | `Enter` (exec) / `Esc` (cancel) | Ex commands like save & quit |
-
-## Keys (current implementation)
-
-NORMAL:
-* `i` – enter INSERT
-* `:` – enter COMMAND
-* Arrow keys (or planned `h j k l`) – move cursor
-* `Esc` in COMMAND returns to NORMAL (also cancels command)
-
-INSERT:
-* Type printable characters to insert at the cursor
-* `Enter` – split line at cursor (text to the right becomes new line)
-* `Backspace` – delete char before cursor; at column 0 join with previous line
-* `Esc` – back to NORMAL; cursor adjusted if it sat past end of line
-
-COMMAND (starts with a `:` prompt on status bar):
-* `:w` – write file
-* `:q` – quit (fails if unsaved changes logic added later)
-* `:wq` – write and quit
-* `Esc` – cancel command input
-
-## UI Layout
-
-1. Text area (all rows except last one) – file buffer lines or `~` markers after EOF
-2. Status bar (last row) – inverted colors; shows either:
-	* COMMAND mode: `:` followed by current command input buffer (`commandString`)
-	* Other modes: `-- MODE -- | line:col | path`
-3. Optional status/help line (second-to-last row when not in COMMAND) – displays `Editor.status`
-
-## Core Data Structures
-
-`Editor` (singleton object):
-* `filePath` – current file path or empty
-* `lines: string[]` – each file line (no trailing newline characters stored)
-* `cursorX`, `cursorY` – zero-based column & row within `lines`
-* `screenRows`, `screenCols` – snapshot of terminal size from `process.stdout`
-* `mode` – one of `NORMAL | INSERT | COMMAND`
-* `commandString` – buffer while typing after `:`
-* `status` – message/info line
-
-`Terminal` utilities wrap raw ANSI escape sequences:
-* `clearScreen()` – ESC[2J (clear) + ESC[H (home)
-* `moveCursor(r,c)` – ESC[<r+1>;<c+1>H (term is 1-based)
-* `invertColors()` – ESC[7m reverse video (used for status bar)
-* `resetColors()` – ESC[m reset attributes
-
-## Rendering Cycle (`render()`)
-
-1. Clear screen
-2. Draw each visible row: real line text or `~` placeholder until `screenRows - 1`
-3. Draw status bar (inverted) padded to full width with `padEnd` to overwrite leftovers
-4. Draw help/status line (only outside COMMAND mode)
-5. Position terminal cursor either inside text area or inside the command prompt
-
-`padEnd(screenCols)` ensures shorter subsequent status lines overwrite previous longer ones.
-
-## Input Handling
-
-Raw mode (`process.stdin.setRawMode(true)`) lets the program receive keystrokes immediately (including escape sequences for arrows). A central keypress dispatcher routes input based on `Editor.mode` to specialized handlers (e.g., `handleInsertModeKeypress`).
-
-### Insert Mode Line Split (Enter)
-```
-currentLine = lines[cursorY]
-rightPart = currentLine.substring(cursorX)
-lines[cursorY] = currentLine.substring(0, cursorX)
-lines.splice(cursorY + 1, 0, rightPart)
-cursorY++; cursorX = 0
+```bash
+# example: Linux x86_64
+curl -LO https://github.com/ashusevim/as-vim/releases/latest/download/as-vim-x86_64-unknown-linux-musl.tar.gz
+tar xzf as-vim-x86_64-unknown-linux-musl.tar.gz
+sudo mv as-vim-*/as-vim /usr/local/bin/
 ```
 
-### Insert Mode Backspace
-* If `cursorX > 0`: remove char before cursor (string slice + concat)
-* Else if not first line: merge current line into previous; adjust `cursorY` and `cursorX`
+### From source
 
-### Esc From Insert
-Adjust `cursorX` if it ended up beyond new line end (mimics Vim moving from insert to normal at last character).
+```bash
+git clone https://github.com/ashusevim/as-vim
+cd as-vim
+cargo install --path .
+```
 
-## Saving
+## Usage
 
-Writing (`:w`) serializes `lines.join("\n")` to `filePath`. Basic error handling updates `status` with success/failure.
+```bash
+as-vim notes.txt     # open (or create on save)
+as-vim               # empty unnamed buffer, use :w <file> to save
+```
 
-## Design Principles
+## Keys
 
-* Keep state minimal & explicit
-* Avoid external dependencies for terminal control (raw ANSI)
-* Pure-ish rendering: UI derived solely from `Editor` state
-* Small surface area to encourage experimentation
+### NORMAL
 
-## Limitations
+| Key | Action |
+|-----|--------|
+| `h` `j` `k` `l` / arrows | move cursor |
+| `0` / `$` | line start / line end |
+| `gg` / `G` | buffer start / buffer end |
+| `Enter` | next line, first column |
+| `i` / `a` / `A` | insert before / after cursor / at line end |
+| `o` / `O` | open line below / above |
+| `x`, `Delete` | delete char under cursor |
+| `dd` | delete line |
+| `:` | enter COMMAND mode |
+| `Ctrl+C` | hint (nothing is force-killed) |
 
-* No undo/redo
-* No search (`/`), replace, or navigation shortcuts beyond arrows
-* No scrolling (assumes file fits in viewport) – implement viewport offset (`rowOffset`) next
-* No detection of terminal resize events
-* No dirty flag / unsaved changes warning
-* Backspace merge bug risk: ensure line concatenation uses previous + current (not duplicate previous)
-* Add input for `h j k l`, `0`, `$`, `dd`, etc.
+### INSERT
 
-## Minimal Specification (Original Goal)
+| Key | Action |
+|-----|--------|
+| printable chars | insert at cursor |
+| `Enter` | split line at cursor |
+| `Backspace` | delete before cursor / join previous line |
+| `Delete` | delete at cursor / join next line |
+| `Esc` | back to NORMAL |
 
-- Start the program
-- Receive input to type characters
-- Move cursor to edit document buffer
-- Save document buffer to disk
-- Load a file from disk
+### COMMAND
+
+| Command | Action |
+|---------|--------|
+| `:w [file]` | save (optionally to a new file) |
+| `:q` | quit (warns if unsaved changes) |
+| `:q!` | quit discarding changes |
+| `:wq` / `:x` | save and quit |
+| `Esc` | cancel command |
+
+## Design principles
+
+- State is minimal and explicit; rendering is a pure function of that state
+- Editor logic is terminal-agnostic and unit-tested (no pty needed for the test suite)
+- Small surface area — read `src/editor.rs` and you have read the editor
+
+## Development
+
+```bash
+cargo test        # 38 tests, no terminal required
+cargo clippy      # lint
+cargo build --release
+```
+
+## Roadmap
+
+- [ ] Search (`/`) and `:s` substitute
+- [ ] Undo/redo
+- [ ] Count-prefixed motions (`5j`, `3dd`)
+- [ ] Syntax-free visual mode (`v` + `d`/`y`)
 
 ## License
 
-others
+MIT — see [LICENSE](LICENSE).
