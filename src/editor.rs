@@ -13,6 +13,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::syntax::Lang;
+
 /// Width in columns used to render tab characters.
 pub const TAB_WIDTH: usize = 4;
 
@@ -145,6 +147,8 @@ pub struct Editor {
     pending_y: bool,
     /// Unnamed register used by `p`/`P`.
     register: Option<Register>,
+    /// Detected language for syntax highlighting.
+    pub lang: Option<Lang>,
     /// Text queued for the system clipboard (OSC 52), taken by the main loop.
     pending_clipboard: Option<String>,
     /// Undo history (oldest first).
@@ -163,6 +167,7 @@ pub struct Editor {
 
 impl Editor {
     pub fn new(file_path: Option<PathBuf>, screen_rows: usize, screen_cols: usize) -> Editor {
+        let lang = file_path.as_deref().and_then(Lang::from_path);
         Editor {
             file_path,
             lines: vec![Vec::new()],
@@ -180,6 +185,7 @@ impl Editor {
             pending_d: false,
             pending_y: false,
             register: None,
+            lang,
             pending_clipboard: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -1006,6 +1012,7 @@ impl Editor {
             Some(a) => {
                 let p = PathBuf::from(a);
                 self.file_path = Some(p.clone());
+                self.lang = Lang::from_path(&p);
                 p
             }
             None => match &self.file_path {

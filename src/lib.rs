@@ -8,4 +8,5 @@
 
 pub mod editor;
 pub mod input;
+pub mod syntax;
 pub mod ui;

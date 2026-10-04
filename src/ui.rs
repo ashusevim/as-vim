@@ -16,6 +16,19 @@ use crossterm::style::{
 use crossterm::terminal::{Clear, ClearType};
 
 use crate::editor::{char_display_width, display_col, Editor, Mode, TAB_WIDTH};
+use crate::syntax::{highlight_line, Class, State as SyntaxState};
+
+/// Foreground color per syntax class; None = terminal default.
+fn color_for(class: Class) -> Option<Color> {
+    match class {
+        Class::Normal => None,
+        Class::Keyword => Some(Color::Blue),
+        Class::Type => Some(Color::Cyan),
+        Class::Str => Some(Color::Green),
+        Class::Comment => Some(Color::DarkGrey),
+        Class::Number => Some(Color::Magenta),
+    }
+}
 
 pub fn refresh_screen(w: &mut impl Write, ed: &mut Editor) -> io::Result<()> {
     ed.update_scroll();
@@ -24,18 +37,34 @@ pub fn refresh_screen(w: &mut impl Write, ed: &mut Editor) -> io::Result<()> {
     queue!(w, Clear(ClearType::All))?;
 
     let text_rows = ed.screen_rows.saturating_sub(2);
+
+    // Syntax state at the first visible line: replay the highlighter over
+    // the scrolled-past lines (block comments are the only cross-line state).
+    let mut syntax_state = SyntaxState::Normal;
+    if let Some(lang) = ed.lang {
+        for line in ed.lines.iter().take(ed.row_off) {
+            syntax_state = highlight_line(lang, line, syntax_state).1;
+        }
+    }
+
     for row in 0..text_rows {
         queue!(w, MoveTo(0, row as u16), Clear(ClearType::CurrentLine))?;
         let buf_row = ed.row_off + row;
         if buf_row < ed.lines.len() {
+            let (classes, next) = match ed.lang {
+                Some(lang) => highlight_line(lang, &ed.lines[buf_row], syntax_state),
+                None => (vec![Class::Normal; ed.lines[buf_row].len()], syntax_state),
+            };
+            syntax_state = next;
             let ranges = ed.search_ranges(buf_row);
-            if ranges.is_empty() {
-                let line = &ed.lines[buf_row];
-                let visible = visible_slice(line, ed.col_off, ed.screen_cols);
-                queue!(w, Print(visible))?;
-            } else {
-                draw_highlighted(w, &ed.lines[buf_row], ed.col_off, ed.screen_cols, &ranges)?;
-            }
+            draw_styled(
+                w,
+                &ed.lines[buf_row],
+                &classes,
+                &ranges,
+                ed.col_off,
+                ed.screen_cols,
+            )?;
         } else {
             queue!(
                 w,
@@ -115,18 +144,20 @@ fn cursor_pos(ed: &Editor) -> (usize, usize) {
     (col, row)
 }
 
-/// Render a buffer line with `/search` match ranges highlighted (dark
-/// background), honouring horizontal scroll and tab expansion.
-fn draw_highlighted(
+/// Render a buffer line with per-character foreground colors (syntax) and
+/// background highlights (search matches), honouring horizontal scroll and
+/// tab expansion. Consecutive chars with identical styling are printed as
+/// one run.
+fn draw_styled(
     w: &mut impl Write,
     line: &[char],
+    classes: &[Class],
+    ranges: &[(usize, usize)],
     col_off: usize,
     max_cols: usize,
-    ranges: &[(usize, usize)],
 ) -> io::Result<()> {
-    // Group consecutive visible chars by "is inside a match" flag.
     let mut group = String::new();
-    let mut group_highlight = false;
+    let mut group_style: (Option<Color>, bool) = (None, false);
     let mut skipped = 0usize;
     let mut width = 0usize;
 
@@ -139,12 +170,16 @@ fn draw_highlighted(
         if width + cw > max_cols {
             break;
         }
-        let highlight = ranges.iter().any(|r| idx >= r.0 && idx < r.1);
-        if highlight != group_highlight && !group.is_empty() {
-            flush_group(w, &group, group_highlight)?;
+        let fg = classes.get(idx).copied().unwrap_or(Class::Normal);
+        let style = (
+            color_for(fg),
+            ranges.iter().any(|r| idx >= r.0 && idx < r.1),
+        );
+        if style != group_style && !group.is_empty() {
+            flush_group(w, &group, group_style)?;
             group.clear();
         }
-        group_highlight = highlight;
+        group_style = style;
         if c == '\t' {
             group.push_str(&" ".repeat(TAB_WIDTH));
         } else {
@@ -152,49 +187,25 @@ fn draw_highlighted(
         }
         width += cw;
     }
-    flush_group(w, &group, group_highlight)
+    flush_group(w, &group, group_style)
 }
 
-fn flush_group(w: &mut impl Write, group: &str, highlight: bool) -> io::Result<()> {
+fn flush_group(w: &mut impl Write, group: &str, style: (Option<Color>, bool)) -> io::Result<()> {
     if group.is_empty() {
         return Ok(());
     }
+    let (fg, highlight) = style;
+    if let Some(color) = fg {
+        queue!(w, SetForegroundColor(color))?;
+    }
     if highlight {
-        queue!(
-            w,
-            SetBackgroundColor(Color::DarkGrey),
-            Print(group),
-            ResetColor
-        )?;
-    } else {
-        queue!(w, Print(group))?;
+        queue!(w, SetBackgroundColor(Color::DarkGrey))?;
+    }
+    queue!(w, Print(group))?;
+    if highlight || fg.is_some() {
+        queue!(w, ResetColor)?;
     }
     Ok(())
-}
-
-/// Render the buffer line starting at display column `col_off`, producing at
-/// most `max_cols` display columns. Tabs expand to `TAB_WIDTH` spaces.
-fn visible_slice(line: &[char], col_off: usize, max_cols: usize) -> String {
-    let mut out = String::new();
-    let mut skipped = 0;
-    let mut width = 0;
-    for &c in line {
-        let cw = char_display_width(c);
-        if skipped + cw <= col_off {
-            skipped += cw;
-            continue;
-        }
-        if width + cw > max_cols {
-            break;
-        }
-        if c == '\t' {
-            out.push_str(&" ".repeat(TAB_WIDTH));
-        } else {
-            out.push(c);
-        }
-        width += cw;
-    }
-    out
 }
 
 /// Truncate a string to roughly `max_cols` display columns.
@@ -212,4 +223,42 @@ fn truncate(s: &str, max_cols: usize) -> String {
         width += cw;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::syntax::Lang;
+
+    fn render(line: &str, ranges: &[(usize, usize)]) -> Vec<u8> {
+        let lang = Lang::Rust;
+        let chars: Vec<char> = line.chars().collect();
+        let (classes, _) = highlight_line(lang, &chars, SyntaxState::Normal);
+        let mut buf = Vec::new();
+        draw_styled(&mut buf, &chars, &classes, ranges, 0, 80).unwrap();
+        buf
+    }
+
+    #[test]
+    fn keyword_gets_color_escape() {
+        let buf = render("let x = 1;", &[]);
+        let s = String::from_utf8(buf).unwrap();
+        // crossterm emits 256-color codes: Blue = 38;5;12
+        assert!(s.contains("\x1b[38;5;12mlet"), "got: {s:?}");
+    }
+
+    #[test]
+    fn search_match_gets_background() {
+        let buf = render("let x", &[(0, 3)]);
+        let s = String::from_utf8(buf).unwrap();
+        // DarkGrey background = 48;5;8
+        assert!(s.contains("\x1b[48;5;8m"), "bg missing: {s:?}");
+    }
+
+    #[test]
+    fn plain_chars_have_no_color() {
+        let buf = render("xy", &[]);
+        let s = String::from_utf8(buf).unwrap();
+        assert_eq!(s, "xy"); // no escapes at all for Normal-only runs
+    }
 }

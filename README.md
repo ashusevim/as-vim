@@ -11,6 +11,7 @@ A minimal, fast, vim-inspired terminal text editor — one tiny, hackable Rust c
 - **Undo/redo** — `u` / `Ctrl+r`, vim-style change grouping (`dd`, `o`+typing, word-runs each undo as one step)
 - **Search** — `/` with incremental prompt, `n`/`N` to repeat, wrap-around, match highlighting, smart-case
 - **Yank/paste + system clipboard** — `yy`, `p`/`P`, `x`/`dd` fill the unnamed register; yanks sync to the system clipboard via OSC 52 (works over SSH)
+- **Syntax highlighting** — Rust, C/C++, JavaScript/TypeScript, Python, Go, Java, Shell, JSON, TOML; zero dependencies, block comments track across lines
 - **Motions** — `h j k l`, arrow keys, `0`, `$`, `gg`, `G`, `PageUp`/`PageDown`
 - **Editing** — `i` `a` `A` `o` `O`, `x`, `dd`, full multi-byte (emoji, CJK) safety
 - **Ex commands** — `:w`, `:w <file>`, `:q`, `:q!`, `:wq`, `:x`
@@ -115,9 +116,9 @@ cargo build --release
 - [x] Undo/redo (`u`, `Ctrl+r`)
 - [x] Search (`/`, `n`, `N`) with highlighting
 - [x] System clipboard over SSH (OSC 52)
+- [x] Syntax highlighting (9 file families)
 - [ ] `:s` substitute / search with replacement
 - [ ] Count-prefixed motions (`5j`, `3dd`)
-- [ ] Syntax highlighting
 - [ ] Visual mode (`v` + `d`/`y`)
 
 ## License
