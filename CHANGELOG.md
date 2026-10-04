@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 — 2026-10-04
+
+### Added
+- **Syntax highlighting** for Rust, C/C++, JavaScript/TypeScript, Python,
+  Go, Java, Shell, JSON, and TOML — detected by file extension (and by
+  `:w <file>` when saving to a new name). Keywords, types, strings,
+  numbers, comments, shell `$vars`, and C preprocessor directives are
+  colored; block comments track state across lines. Zero new
+  dependencies — hand-rolled per-language scanners.
+
 ## 0.2.0 — 2026-10-04
 
 ### Added
