@@ -3,7 +3,7 @@
 //! Binary entry point: CLI parsing, terminal setup/teardown, event loop.
 //! All editor logic lives in [`as_vim::editor`].
 
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 
 use clap::Parser;
@@ -72,6 +72,11 @@ fn run(cli: &Cli, stdout: &mut io::Stdout) -> io::Result<()> {
             TerminalEvent::Input(input) => {
                 if ed.handle_input(input) == Effect::Quit {
                     return Ok(());
+                }
+                // Yank → system clipboard via OSC 52 (works over SSH).
+                if let Some(text) = ed.take_clipboard() {
+                    let b64 = as_vim::editor::base64_encode(text.as_bytes());
+                    write!(stdout, "\x1b]52;c;{b64}\x07")?;
                 }
             }
         }

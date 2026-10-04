@@ -8,6 +8,9 @@ A minimal, fast, vim-inspired terminal text editor — one tiny, hackable Rust c
 ## Features
 
 - **Modal editing** — NORMAL / INSERT / COMMAND, vim-style
+- **Undo/redo** — `u` / `Ctrl+r`, vim-style change grouping (`dd`, `o`+typing, word-runs each undo as one step)
+- **Search** — `/` with incremental prompt, `n`/`N` to repeat, wrap-around, match highlighting, smart-case
+- **Yank/paste + system clipboard** — `yy`, `p`/`P`, `x`/`dd` fill the unnamed register; yanks sync to the system clipboard via OSC 52 (works over SSH)
 - **Motions** — `h j k l`, arrow keys, `0`, `$`, `gg`, `G`, `PageUp`/`PageDown`
 - **Editing** — `i` `a` `A` `o` `O`, `x`, `dd`, full multi-byte (emoji, CJK) safety
 - **Ex commands** — `:w`, `:w <file>`, `:q`, `:q!`, `:wq`, `:x`
@@ -64,7 +67,11 @@ as-vim               # empty unnamed buffer, use :w <file> to save
 | `i` / `a` / `A` | insert before / after cursor / at line end |
 | `o` / `O` | open line below / above |
 | `x`, `Delete` | delete char under cursor |
-| `dd` | delete line |
+| `dd` | delete line (into unnamed register) |
+| `yy` | yank line (also → system clipboard via OSC 52) |
+| `p` / `P` | paste register after / before cursor |
+| `u` / `Ctrl+r` | undo / redo |
+| `/` | search (then `Enter`, `n`, `N`) |
 | `:` | enter COMMAND mode |
 | `Ctrl+C` | hint (nothing is force-killed) |
 
@@ -86,6 +93,7 @@ as-vim               # empty unnamed buffer, use :w <file> to save
 | `:q` | quit (warns if unsaved changes) |
 | `:q!` | quit discarding changes |
 | `:wq` / `:x` | save and quit |
+| `:undo` / `:redo` | undo / redo |
 | `Esc` | cancel command |
 
 ## Design principles
@@ -104,10 +112,13 @@ cargo build --release
 
 ## Roadmap
 
-- [ ] Search (`/`) and `:s` substitute
-- [ ] Undo/redo
+- [x] Undo/redo (`u`, `Ctrl+r`)
+- [x] Search (`/`, `n`, `N`) with highlighting
+- [x] System clipboard over SSH (OSC 52)
+- [ ] `:s` substitute / search with replacement
 - [ ] Count-prefixed motions (`5j`, `3dd`)
-- [ ] Syntax-free visual mode (`v` + `d`/`y`)
+- [ ] Syntax highlighting
+- [ ] Visual mode (`v` + `d`/`y`)
 
 ## License
 
