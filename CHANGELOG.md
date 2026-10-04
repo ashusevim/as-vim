@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.1 — 2026-10-04
+
+### Changed
+- README repositioned around the two target use cases (drop-in editor for
+  containers/rescue boxes; safe `$EDITOR` for git/crontab/kubectl) with a
+  comparison table and a working `releases/latest/download` quick start.
+- Release workflow also uploads versionless archives
+  (`as-vim-<target>.tar.gz`) so the latest-release links stay stable.
+
+No code changes — this release exists to sync the crates.io page with
+the GitHub README.
+
 ## 0.3.0 — 2026-10-04
 
 ### Added

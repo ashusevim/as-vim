@@ -1,6 +1,6 @@
 [package]
 name = "as-vim"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "A minimal, fast, vim-inspired terminal text editor in a single static binary"
 license = "MIT"
