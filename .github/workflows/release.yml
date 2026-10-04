@@ -39,7 +39,14 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          # musl cross builds have no external cross-linker on the runners;
+          # rust-lld + self-contained musl objects link fully static binaries.
+          if [[ "${{ matrix.target }}" == *-musl ]]; then
+            export RUSTFLAGS="-C linker=rust-lld -C link-self-contained=yes"
+          fi
+          cargo build --release --target ${{ matrix.target }}
       - name: Package
         shell: bash
         run: |
