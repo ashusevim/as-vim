@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.0 — 2026-10-05
+
+### Added
+- **Count prefixes** — `3j`, `5l`, `2dd`, `3yy`, `4x`, `3p`, `12G`, `5gg`,
+  `2PageUp`; counts accumulate (`12j`) and `0` stays the line-start
+  motion. Operators run as one undo step.
+- **Visual mode (charwise)** — `v` + motions to select, `d`/`x` delete,
+  `y` yank (OSC 52), `o` swaps ends, `Esc`/`v` exits. Selections span
+  lines; multi-line yanks paste with vim's inline-join semantics; every
+  operation is one undo transaction. Selection renders as reverse video.
+
 ## 0.4.0 — 2026-10-05
 
 ### Added

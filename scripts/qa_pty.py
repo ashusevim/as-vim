@@ -157,6 +157,10 @@ with open(os.path.join(WORK, "hscroll.txt"), "w") as f:
     f.write(("x" * 195) + "tail\n")
 with open(os.path.join(WORK, "crlf.txt"), "wb") as f:
     f.write(b"one\r\ntwo\r\n")
+with open(os.path.join(WORK, "counts.txt"), "w") as f:
+    f.write("a\nb\nc\nd\ne\n")
+with open(os.path.join(WORK, "vml.txt"), "w") as f:
+    f.write("keep1 cut1\ncut2 keep2\n")
 with open(os.path.join(WORK, "sub.txt"), "w") as f:
     f.write("one one\ntwo one\n")
 with open(os.path.join(WORK, "subline.txt"), "w") as f:
@@ -686,6 +690,41 @@ def t_highlight_clears(s):
     s.send("\r")
 
 scenario("search highlight clears on edit", "hl.txt", t_highlight_clears)
+
+def t_counts_dd(s):
+    s.pump(0.3)
+    s.type("2dd")              # delete lines 1-2
+    s.pump(0.3)
+    s.type(":wq")
+    s.send("\r")
+
+scenario("count 2dd", "counts.txt", t_counts_dd, file_expect="c\nd\ne\n")
+
+def t_visual_multiline(s):
+    s.pump(0.3)
+    s.type("$v j0llld")        # cross-line selection delete
+    s.pump(0.3)
+    s.type(":wq")
+    s.send("\r")
+
+scenario("visual multi-line delete", "vml.txt", t_visual_multiline,
+         file_expect="keep1 cut keep2\n")
+
+def t_visual_status(s):
+    s.type("v")
+    s.pump(0.3)
+
+    def vis_label(sess):
+        return "VISUAL" in sess.status_row(), sess.status_row()
+    check("visual mode label in status bar", vis_label(s)[0], s.status_row())
+    s.type("d")                # nothing selected beyond cursor: exits visual
+    s.pump(0.2)
+    s.type(":q!")
+    s.send("\r")
+
+scenario("visual status label", "vlabel.txt", t_visual_status)
+
+# ---------------------------------------------------------------- run all
 
 # ---------------------------------------------------------------- run all
 

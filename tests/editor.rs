@@ -211,6 +211,7 @@ fn zero_dollar_g_and_g_motions() {
     e.handle_input(Input::Char('G'));
     assert_eq!(e.cy, 2);
     e.handle_input(Input::Char('g'));
+    e.handle_input(Input::Char('g'));
     assert_eq!(e.cy, 0);
     e.handle_input(Input::Char('$'));
     assert_eq!(e.cx, 1);
@@ -1080,4 +1081,264 @@ fn undo_after_dd_on_last_line_restores_sane_cursor() {
     e.handle_input(Input::Char('u'));
     assert_eq!(text(&e), "a\nb\nc");
     assert!(e.cy <= 2);
+}
+
+// ----------------------------------------------------------------------
+// v0.5 — count-prefixed motions and operators
+// ----------------------------------------------------------------------
+
+#[test]
+fn count_multiplies_motions() {
+    let content: String = (0..20).map(|i| format!("line{i}\n")).collect();
+    let mut e = ed_with(&content);
+    feed(&mut e, &[Input::Char('5'), Input::Char('j')]);
+    assert_eq!(e.cy, 5);
+    feed(&mut e, &[Input::Char('3'), Input::Char('k')]);
+    assert_eq!(e.cy, 2);
+    // counts accumulate: 12j = 2+... from line 2 -> 12
+    feed(
+        &mut e,
+        &[Input::Char('1'), Input::Char('2'), Input::Char('j')],
+    );
+    assert_eq!(e.cy, 14);
+}
+
+#[test]
+fn count_zero_is_line_start_not_count() {
+    let mut e = ed_with("abc");
+    feed(
+        &mut e,
+        &[Input::Char('l'), Input::Char('l'), Input::Char('0')],
+    );
+    assert_eq!(e.cx, 0);
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn count_G_and_gg_goto_line() {
+    let content: String = (0..20).map(|i| format!("line{i}\n")).collect();
+    let mut e = ed_with(&content);
+    feed(&mut e, &[Input::Char('7'), Input::Char('G')]);
+    assert_eq!(e.cy, 6);
+    feed(
+        &mut e,
+        &[
+            Input::Char('1'),
+            Input::Char('5'),
+            Input::Char('g'),
+            Input::Char('g'),
+        ],
+    );
+    assert_eq!(e.cy, 14);
+    // plain gg still goes to line 1
+    feed(&mut e, &[Input::Char('g'), Input::Char('g')]);
+    assert_eq!(e.cy, 0);
+}
+
+#[test]
+fn count_dd_deletes_n_lines_as_one_undo() {
+    let mut e = ed_with("a\nb\nc\nd\ne");
+    feed(
+        &mut e,
+        &[Input::Char('2'), Input::Char('d'), Input::Char('d')],
+    );
+    assert_eq!(text(&e), "c\nd\ne"); // lines "a","b" removed
+    e.handle_input(Input::Char('u'));
+    assert_eq!(text(&e), "a\nb\nc\nd\ne");
+}
+
+#[test]
+fn count_yy_yanks_n_lines_and_pastes() {
+    let mut e = ed_with("a\nb\nc");
+    feed(
+        &mut e,
+        &[
+            Input::Char('2'),
+            Input::Char('y'),
+            Input::Char('y'),
+            Input::Char('p'),
+        ],
+    );
+    assert_eq!(text(&e), "a\na\nb\nb\nc"); // pasted after line "a"
+}
+
+#[test]
+fn count_x_deletes_n_chars() {
+    let mut e = ed_with("abcdef");
+    feed(&mut e, &[Input::Char('3'), Input::Char('x')]);
+    assert_eq!(text(&e), "def");
+    // more than available: stops at line end
+    feed(&mut e, &[Input::Char('9'), Input::Char('x')]);
+    assert_eq!(text(&e), "");
+}
+
+#[test]
+fn count_p_pastes_n_times() {
+    let mut e = ed_with("ab");
+    feed(
+        &mut e,
+        &[
+            Input::Char('y'),
+            Input::Char('y'),
+            Input::Char('2'),
+            Input::Char('p'),
+        ],
+    );
+    assert_eq!(text(&e), "ab\nab\nab");
+}
+
+#[test]
+fn count_is_reset_by_uncounatable_keys() {
+    let mut e = ed_with("a\nb\nc\nd");
+    feed(&mut e, &[Input::Char('3'), Input::Char('u')]); // 3 dropped
+    feed(&mut e, &[Input::Char('j')]);
+    assert_eq!(e.cy, 1);
+}
+
+// ----------------------------------------------------------------------
+// v0.5 — visual mode
+// ----------------------------------------------------------------------
+
+#[test]
+fn visual_select_and_delete_single_line() {
+    let mut e = ed_with("hello world");
+    // v, 4 l (over "hell" + 'o'? v then 4l selects h..o cols 0..4), d
+    feed(
+        &mut e,
+        &[
+            Input::Char('v'),
+            Input::Char('4'),
+            Input::Char('l'),
+            Input::Char('d'),
+        ],
+    );
+    assert_eq!(text(&e), " world");
+    assert_eq!(e.mode, Mode::Normal);
+    // register holds the selection
+    match &e.register {
+        Some(as_vim::editor::Register::Chars(c)) => {
+            let s: String = c.iter().collect();
+            assert_eq!(s, "hello");
+        }
+        other => panic!("unexpected register {other:?}"),
+    }
+    // one undo step
+    e.handle_input(Input::Char('u'));
+    assert_eq!(text(&e), "hello world");
+}
+
+#[test]
+fn visual_yank_and_paste_multiline() {
+    let mut e = ed_with("alpha\nbeta\ngamma");
+    feed(
+        &mut e,
+        &[
+            Input::Char('v'),
+            Input::Char('j'),
+            Input::Char('l'),
+            Input::Char('y'),
+        ],
+    );
+    assert_eq!(e.mode, Mode::Normal);
+    // cursor on "beta" col 1; selection was "alpha\nbe"; p after cursor char
+    e.handle_input(Input::Char('p'));
+    assert_eq!(text(&e), "alpha\nbealpha\nbeta\ngamma");
+}
+
+#[test]
+fn visual_delete_across_lines() {
+    let mut e = ed_with("keep1 cut1\ncut2 keep2");
+    // select from 'c' of cut1 (line0 col6) to '2' of cut2 (line1 col3)
+    e.handle_input(Input::Char('$')); // end of line 0
+    e.handle_input(Input::Char('v'));
+    e.handle_input(Input::Char('j'));
+    e.handle_input(Input::Char('0'));
+    e.handle_input(Input::Char('l'));
+    e.handle_input(Input::Char('l'));
+    e.handle_input(Input::Char('l')); // col 3
+    e.handle_input(Input::Char('d'));
+    assert_eq!(text(&e), "keep1 cut keep2");
+}
+
+#[test]
+fn visual_esc_cancels_and_v_toggles() {
+    let mut e = ed_with("abc");
+    e.handle_input(Input::Char('v'));
+    assert_eq!(e.mode, Mode::Visual);
+    e.handle_input(Input::Char('v'));
+    assert_eq!(e.mode, Mode::Normal);
+    e.handle_input(Input::Char('v'));
+    e.handle_input(Input::Esc);
+    assert_eq!(e.mode, Mode::Normal);
+    assert_eq!(text(&e), "abc");
+    assert!(!e.dirty());
+}
+
+#[test]
+fn visual_selection_range_normalization() {
+    // selecting backwards: anchor right, cursor left
+    let mut e = ed_with("abcdef");
+    feed(
+        &mut e,
+        &[
+            Input::Char('$'),
+            Input::Char('v'),
+            Input::Char('h'),
+            Input::Char('h'),
+        ],
+    );
+    let ((y0, x0), (y1, x1)) = e.visual_range();
+    assert_eq!((y0, x0), (0, 3)); // cursor on col 3 after two h from $
+    assert_eq!((y1, x1), (0, 5));
+}
+
+#[test]
+fn visual_o_swaps_ends() {
+    let mut e = ed_with("abcdef");
+    feed(
+        &mut e,
+        &[Input::Char('v'), Input::Char('l'), Input::Char('o')],
+    );
+    // anchor now at old cursor (1); cursor back at anchor (0)
+    assert_eq!(e.visual_anchor, (1, 0));
+    assert_eq!(e.cx, 0);
+}
+
+#[test]
+fn visual_delete_selection_shrinks_to_cursor() {
+    // delete selection that ends mid-word
+    let mut e = ed_with("one two three");
+    feed(
+        &mut e,
+        &[
+            Input::Char('v'),
+            Input::Char('5'),
+            Input::Char('l'),
+            Input::Char('x'),
+        ],
+    );
+    // cols 0..5 = "one tw" deleted -> "o three"
+    assert_eq!(text(&e), "o three");
+}
+
+#[test]
+fn paste_char_register_with_newlines_from_visual_yank() {
+    let mut e = ed_with("aa\nbb");
+    feed(
+        &mut e,
+        &[
+            Input::Char('v'),
+            Input::Char('j'),
+            Input::Char('$'),
+            Input::Char('y'),
+        ],
+    );
+    // selection "aa\nbb"; move to line 3? buffer has 2 lines; go to end
+    feed(
+        &mut e,
+        &[Input::Char('G'), Input::Char('$'), Input::Char('p')],
+    );
+    // paste at end of "bb" -> "bb" + newline? selection ends at 'b' (col 1)
+    // pasted text "aa\nbb" after the final 'b': "bbaa" / "bb"
+    assert_eq!(text(&e), "aa\nbbaa\nbb"); // vim p: after cursor char
 }

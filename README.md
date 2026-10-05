@@ -50,8 +50,9 @@ If you want LSP, splits, or a file tree, use [Helix](https://helix-editor.com) o
 - **Substitute** — `:s/old/new/`, `:s/../../g`, `:%s/old/new/g`; escapes, last-search reuse, one undo step per command
 - **Yank/paste + system clipboard** — `yy`, `p`/`P`, `x`/`dd` fill the unnamed register; yanks sync to the system clipboard via OSC 52 (works over SSH)
 - **Syntax highlighting** — Rust, C/C++, JavaScript/TypeScript, Python, Go, Java, Shell, JSON, TOML; zero dependencies, block comments track across lines
-- **Motions** — `h j k l`, arrow keys, `0`, `$`, `gg`, `G`, `PageUp`/`PageDown`
+- **Motions** — `h j k l`, arrow keys, `0`, `$`, `gg`, `G`, `PageUp`/`PageDown`, count prefixes (`5j`, `3dd`, `2yy`, `12G`)
 - **Editing** — `i` `a` `A` `o` `O`, `x`, `dd`, full multi-byte (emoji, CJK) safety
+- **Visual mode** — `v` + motions, `d`/`x` delete, `y` yank (OSC 52), `o` swap ends; selections span lines
 - **Ex commands** — `:w`, `:w <file>`, `:q`, `:q!`, `:wq`, `:x`, `:undo`, `:redo`
 - **Safe defaults** — `:q` refuses to discard unsaved changes; dirty indicator `[+]` in the status bar
 - **Scrolling** — files bigger than the viewport scroll vertically *and* horizontally
@@ -108,11 +109,12 @@ export EDITOR=as-vim   # git, crontab, kubectl, systemctl, sudoedit
 | `Enter` | next line, first column |
 | `i` / `a` / `A` | insert before / after cursor / at line end |
 | `o` / `O` | open line below / above |
-| `x`, `Delete` | delete char under cursor |
-| `dd` | delete line (into unnamed register) |
-| `yy` | yank line (also → system clipboard via OSC 52) |
-| `p` / `P` | paste register after / before cursor |
+| `x`, `Delete` | delete char under cursor (count: `4x`) |
+| `dd` | delete line(s) (count: `3dd`) |
+| `yy` | yank line(s) (count: `2yy`, also → system clipboard via OSC 52) |
+| `p` / `P` | paste register after / before cursor (count: `3p`) |
 | `u` / `Ctrl+r` | undo / redo |
+| `v` | visual mode: motions select, `d`/`x` delete, `y` yank, `o` swap ends |
 | `/` | search (then `Enter`, `n`, `N`) |
 | `:` | enter COMMAND mode |
 | `Ctrl+C` | hint (nothing is force-killed) |
@@ -162,8 +164,10 @@ cargo build --release
 - [x] System clipboard over SSH (OSC 52)
 - [x] Syntax highlighting (9 file families)
 - [x] `:s` substitute / search with replacement
-- [ ] Count-prefixed motions (`5j`, `3dd`)
-- [ ] Visual mode (`v` + `d`/`y`)
+- [x] Count-prefixed motions (`5j`, `3dd`)
+- [x] Visual mode (`v` + `d`/`y`)
+- [ ] Linewise visual mode (`V`)
+- [ ] `w`/`b`/`e` word motions with counts
 
 ## License
 

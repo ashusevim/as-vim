@@ -38,6 +38,9 @@ pub fn refresh_screen(w: &mut impl Write, ed: &mut Editor) -> io::Result<()> {
 
     let text_rows = ed.screen_rows.saturating_sub(2);
 
+    // Visual selection, if any: (y0, x0, y1, x1) inclusive.
+    let selection = ed.visual_selection();
+
     // Syntax state at the first visible line: replay the highlighter over
     // the scrolled-past lines (block comments are the only cross-line state).
     let mut syntax_state = SyntaxState::Normal;
@@ -57,11 +60,25 @@ pub fn refresh_screen(w: &mut impl Write, ed: &mut Editor) -> io::Result<()> {
             };
             syntax_state = next;
             let ranges = ed.search_ranges(buf_row);
+            let visual_span = selection.and_then(|(y0, x0, y1, x1)| {
+                if buf_row < y0 || buf_row > y1 {
+                    None
+                } else if y0 == y1 {
+                    Some((x0, x1))
+                } else if buf_row == y0 {
+                    Some((x0, usize::MAX))
+                } else if buf_row == y1 {
+                    Some((0, x1))
+                } else {
+                    Some((0, usize::MAX))
+                }
+            });
             draw_styled(
                 w,
                 &ed.lines[buf_row],
                 &classes,
                 &ranges,
+                visual_span,
                 ed.col_off,
                 ed.screen_cols,
             )?;
@@ -148,16 +165,18 @@ fn cursor_pos(ed: &Editor) -> (usize, usize) {
 /// background highlights (search matches), honouring horizontal scroll and
 /// tab expansion. Consecutive chars with identical styling are printed as
 /// one run.
+#[allow(clippy::too_many_arguments)]
 fn draw_styled(
     w: &mut impl Write,
     line: &[char],
     classes: &[Class],
     ranges: &[(usize, usize)],
+    visual_span: Option<(usize, usize)>,
     col_off: usize,
     max_cols: usize,
 ) -> io::Result<()> {
     let mut group = String::new();
-    let mut group_style: (Option<Color>, bool) = (None, false);
+    let mut group_style: (Option<Color>, bool, bool) = (None, false, false);
     let mut skipped = 0usize;
     let mut width = 0usize;
 
@@ -171,10 +190,11 @@ fn draw_styled(
             break;
         }
         let fg = classes.get(idx).copied().unwrap_or(Class::Normal);
-        let style = (
-            color_for(fg),
-            ranges.iter().any(|r| idx >= r.0 && idx < r.1),
-        );
+        let in_search = ranges.iter().any(|r| idx >= r.0 && idx < r.1);
+        let in_visual = visual_span
+            .map(|(a, b)| idx >= a && idx <= b)
+            .unwrap_or(false);
+        let style = (color_for(fg), in_search, in_visual);
         if style != group_style && !group.is_empty() {
             flush_group(w, &group, group_style)?;
             group.clear();
@@ -190,19 +210,26 @@ fn draw_styled(
     flush_group(w, &group, group_style)
 }
 
-fn flush_group(w: &mut impl Write, group: &str, style: (Option<Color>, bool)) -> io::Result<()> {
+fn flush_group(
+    w: &mut impl Write,
+    group: &str,
+    style: (Option<Color>, bool, bool),
+) -> io::Result<()> {
     if group.is_empty() {
         return Ok(());
     }
-    let (fg, highlight) = style;
+    let (fg, highlight, visual) = style;
     if let Some(color) = fg {
         queue!(w, SetForegroundColor(color))?;
+    }
+    if visual {
+        queue!(w, SetAttribute(Attribute::Reverse))?;
     }
     if highlight {
         queue!(w, SetBackgroundColor(Color::DarkGrey))?;
     }
     queue!(w, Print(group))?;
-    if highlight || fg.is_some() {
+    if highlight || visual || fg.is_some() {
         queue!(w, ResetColor)?;
     }
     Ok(())
@@ -235,7 +262,7 @@ mod tests {
         let chars: Vec<char> = line.chars().collect();
         let (classes, _) = highlight_line(lang, &chars, SyntaxState::Normal);
         let mut buf = Vec::new();
-        draw_styled(&mut buf, &chars, &classes, ranges, 0, 80).unwrap();
+        draw_styled(&mut buf, &chars, &classes, ranges, None, 0, 80).unwrap();
         buf
     }
 
