@@ -1,8 +1,9 @@
 //! Maps crossterm events onto the backend-independent [`Input`] enum.
 
 use std::io;
+use std::time::Duration;
 
-use crossterm::event::{read, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::editor::Input;
 
@@ -13,21 +14,39 @@ pub enum TerminalEvent {
     Resize,
 }
 
-/// Block until a meaningful terminal event arrives.
-pub fn read_terminal_event() -> io::Result<TerminalEvent> {
+/// Wait up to `timeout` for a meaningful terminal event.
+/// Returns `Ok(None)` when nothing arrived (caller may tick timers).
+pub fn poll_event(timeout: Duration) -> io::Result<Option<TerminalEvent>> {
+    if !event::poll(timeout)? {
+        return Ok(None);
+    }
     loop {
-        match read()? {
-            Event::Resize(..) => return Ok(TerminalEvent::Resize),
+        match event::read()? {
+            Event::Resize(..) => return Ok(Some(TerminalEvent::Resize)),
             Event::Key(key)
                 // Windows sends Release/Repeat events; act on presses and repeats.
                 if key.kind != KeyEventKind::Release =>
             {
                 if let Some(input) = map_key(key) {
-                    return Ok(TerminalEvent::Input(input));
+                    return Ok(Some(TerminalEvent::Input(input)));
                 }
             }
             // FocusGained/Lost, Mouse, Paste — ignore.
             _ => {}
+        }
+        // We consumed an event that mapped to nothing; drain what's already
+        // queued before reporting an idle tick.
+        if !event::poll(Duration::ZERO)? {
+            return Ok(None);
+        }
+    }
+}
+
+/// Block until a meaningful terminal event arrives.
+pub fn read_terminal_event() -> io::Result<TerminalEvent> {
+    loop {
+        if let Some(ev) = poll_event(Duration::from_secs(1))? {
+            return Ok(ev);
         }
     }
 }

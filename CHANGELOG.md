@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0 — 2026-10-05
+
+### Added
+- **Substitute**: `:s/old/new/` (first match on the current line),
+  `:s/old/new/g` (all matches on the line), and `:%s/old/new/g` (whole
+  buffer) — smart-case like `/`, `\/` and `\\` escapes, empty pattern
+  reuses the last search, empty replacement deletes, and the whole
+  command is one undo step. Reports `N substitution(s) on M lines`.
+
+### Changed
+- `/`-search highlighting now clears on the next buffer edit (vim
+  hlsearch behaviour); `n`/`N` re-arm it.
+- Status messages fade after 3 seconds (help text stays); the event
+  loop polls instead of blocking so messages fade without keypresses.
+
 ## 0.3.1 — 2026-10-04
 
 ### Changed

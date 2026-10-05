@@ -47,6 +47,7 @@ If you want LSP, splits, or a file tree, use [Helix](https://helix-editor.com) o
 - **Modal editing** — NORMAL / INSERT / COMMAND, vim-style
 - **Undo/redo** — `u` / `Ctrl+r`, vim-style change grouping (`dd`, `o`+typing, word-runs each undo as one step)
 - **Search** — `/` with incremental prompt, `n`/`N` to repeat, wrap-around, match highlighting, smart-case
+- **Substitute** — `:s/old/new/`, `:s/../../g`, `:%s/old/new/g`; escapes, last-search reuse, one undo step per command
 - **Yank/paste + system clipboard** — `yy`, `p`/`P`, `x`/`dd` fill the unnamed register; yanks sync to the system clipboard via OSC 52 (works over SSH)
 - **Syntax highlighting** — Rust, C/C++, JavaScript/TypeScript, Python, Go, Java, Shell, JSON, TOML; zero dependencies, block comments track across lines
 - **Motions** — `h j k l`, arrow keys, `0`, `$`, `gg`, `G`, `PageUp`/`PageDown`
@@ -135,6 +136,9 @@ export EDITOR=as-vim   # git, crontab, kubectl, systemctl, sudoedit
 | `:q!` | quit discarding changes |
 | `:wq` / `:x` | save and quit |
 | `:undo` / `:redo` | undo / redo |
+| `:s/old/new/` | replace first match on the current line |
+| `:s/old/new/g` | replace every match on the current line |
+| `:%s/old/new/g` | replace across the whole buffer |
 | `Esc` | cancel command |
 
 ## Design principles
@@ -157,7 +161,7 @@ cargo build --release
 - [x] Search (`/`, `n`, `N`) with highlighting
 - [x] System clipboard over SSH (OSC 52)
 - [x] Syntax highlighting (9 file families)
-- [ ] `:s` substitute / search with replacement
+- [x] `:s` substitute / search with replacement
 - [ ] Count-prefixed motions (`5j`, `3dd`)
 - [ ] Visual mode (`v` + `d`/`y`)
 
