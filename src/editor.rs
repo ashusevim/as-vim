@@ -33,6 +33,8 @@ pub enum Mode {
     Command,
     /// Typing a `/` search term.
     Search,
+    /// Charwise visual selection (`v`).
+    Visual,
 }
 
 impl Mode {
@@ -42,6 +44,7 @@ impl Mode {
             Mode::Insert => "INSERT",
             Mode::Command => "COMMAND",
             Mode::Search => "SEARCH",
+            Mode::Visual => "VISUAL",
         }
     }
 }
@@ -152,8 +155,14 @@ pub struct Editor {
     pending_d: bool,
     /// Normal mode: `y` was pressed, waiting for the second `y`.
     pending_y: bool,
+    /// `g` was pressed, waiting for the second `g` (gg).
+    pending_g: bool,
+    /// Count digits accumulated for the next motion/operator (`3dd`, `5j`).
+    count: Option<usize>,
+    /// Anchor (cx, cy) where the current visual selection started.
+    pub visual_anchor: (usize, usize),
     /// Unnamed register used by `p`/`P`.
-    register: Option<Register>,
+    pub register: Option<Register>,
     /// Detected language for syntax highlighting.
     pub lang: Option<Lang>,
     /// Text queued for the system clipboard (OSC 52), taken by the main loop.
@@ -195,6 +204,9 @@ impl Editor {
             col_off: 0,
             pending_d: false,
             pending_y: false,
+            pending_g: false,
+            count: None,
+            visual_anchor: (0, 0),
             register: None,
             lang,
             pending_clipboard: None,
@@ -294,7 +306,7 @@ impl Editor {
             // INSERT may sit one past the last char (append position);
             // COMMAND/SEARCH cursors live on the status bar, clamping is harmless.
             Mode::Insert | Mode::Command | Mode::Search => self.cx = self.cx.min(len),
-            Mode::Normal => self.clamp_cx_normal(),
+            Mode::Normal | Mode::Visual => self.clamp_cx_normal(),
         }
     }
 
@@ -314,77 +326,126 @@ impl Editor {
                 self.search_input(input);
                 Effect::None
             }
+            Mode::Visual => self.visual_input(input),
         };
         self.clamp_cursor();
         effect
     }
 
-    fn normal_input(&mut self, input: Input) -> Effect {
-        // `dd` / `yy` operator handling; any other key clears the pending state.
-        if self.pending_d {
-            self.pending_d = false;
-            if input == Input::Char('d') {
-                self.delete_line();
-                return Effect::None;
+    /// Accumulate a count digit. Returns true when the input was consumed as
+    /// a count digit (`0` alone is the line-start motion, not a count).
+    fn count_digit(&mut self, input: Input) -> bool {
+        if let Input::Char(c) = input {
+            if c.is_ascii_digit() {
+                let d = c.to_digit(10).unwrap() as usize;
+                self.count = Some(self.count.unwrap_or(0) * 10 + d);
+                return true;
             }
         }
-        if self.pending_y {
-            self.pending_y = false;
-            if input == Input::Char('y') {
-                self.yank_line();
-                return Effect::None;
-            }
-        }
+        false
+    }
 
+    /// Motions shared by NORMAL and VISUAL mode. `count >= 1`.
+    /// Returns true when the input was a motion.
+    fn apply_motion(&mut self, input: Input, count: usize) -> bool {
         match input {
             Input::Char('h') | Input::ArrowLeft => {
-                if self.cx > 0 {
-                    self.cx -= 1;
-                }
+                self.cx = self.cx.saturating_sub(count);
             }
             Input::Char('l') | Input::ArrowRight => {
-                if self.cx < self.cur_line_len().saturating_sub(1) {
-                    self.cx += 1;
-                }
+                let max = self.cur_line_len().saturating_sub(1);
+                self.cx = (self.cx + count).min(max);
             }
-            Input::Char('j') | Input::ArrowDown | Input::Enter => {
-                if self.cy + 1 < self.lines.len() {
-                    self.cy += 1;
-                    self.clamp_cx_normal();
-                    if input == Input::Enter {
-                        self.cx = 0;
-                    }
-                }
+            Input::Char('j') | Input::ArrowDown => {
+                self.cy = (self.cy + count).min(self.lines.len() - 1);
+                self.clamp_cx_normal();
             }
             Input::Char('k') | Input::ArrowUp => {
-                if self.cy > 0 {
-                    self.cy -= 1;
-                    self.clamp_cx_normal();
-                }
+                self.cy = self.cy.saturating_sub(count);
+                self.clamp_cx_normal();
+            }
+            Input::Enter => {
+                self.cy = (self.cy + count).min(self.lines.len() - 1);
+                self.clamp_cx_normal();
+                self.cx = 0;
             }
             Input::Char('0') => self.cx = 0,
             Input::Char('$') | Input::End => {
                 self.cx = self.cur_line_len().saturating_sub(1);
             }
             Input::Home => self.cx = 0,
-            Input::Char('g') => {
-                self.cy = 0;
-                self.clamp_cx_normal();
-            }
             Input::Char('G') => {
-                self.cy = self.lines.len() - 1;
+                self.cy = if count > 1 {
+                    (count - 1).min(self.lines.len() - 1)
+                } else {
+                    self.lines.len() - 1
+                };
                 self.clamp_cx_normal();
             }
             Input::PageUp => {
-                let page = self.page_height();
+                let page = self.page_height() * count;
                 self.cy = self.cy.saturating_sub(page);
                 self.clamp_cx_normal();
             }
             Input::PageDown => {
-                let page = self.page_height();
+                let page = self.page_height() * count;
                 self.cy = (self.cy + page).min(self.lines.len() - 1);
                 self.clamp_cx_normal();
             }
+            _ => return false,
+        }
+        true
+    }
+
+    fn normal_input(&mut self, input: Input) -> Effect {
+        // Count digits (`3dd`, `5j`, `10G`); a bare `0` is the line-start
+        // motion, so it only accumulates once a count has started.
+        let zero_motion = input == Input::Char('0') && self.count.is_none();
+        if !zero_motion && self.count_digit(input) {
+            return Effect::None;
+        }
+
+        // `gg` operator: `g` waits for a second `g`; with a count it goes to
+        // that line (1-based).
+        if self.pending_g {
+            self.pending_g = false;
+            if input == Input::Char('g') {
+                let n = self.count.take().unwrap_or(1);
+                self.cy = if n > 1 {
+                    (n - 1).min(self.lines.len() - 1)
+                } else {
+                    0
+                };
+                self.clamp_cx_normal();
+                return Effect::None;
+            }
+        }
+
+        // `dd` / `yy` operator handling; the count typed before the first
+        // key is kept until the second key arrives.
+        if self.pending_d {
+            self.pending_d = false;
+            if input == Input::Char('d') {
+                let n = self.count.take().unwrap_or(1);
+                self.delete_lines(n);
+                return Effect::None;
+            }
+        }
+        if self.pending_y {
+            self.pending_y = false;
+            if input == Input::Char('y') {
+                let n = self.count.take().unwrap_or(1);
+                self.yank_lines(n);
+                return Effect::None;
+            }
+        }
+
+        let count = self.count.take().unwrap_or(1);
+        if self.apply_motion(input, count) {
+            return Effect::None;
+        }
+
+        match input {
             Input::Char('i') => {
                 self.mode = Mode::Insert;
                 self.set_status(String::from("-- INSERT -- (Esc for NORMAL)"));
@@ -443,32 +504,33 @@ impl Editor {
                 self.set_status(String::from("-- INSERT -- (Esc for NORMAL)"));
             }
             Input::Char('x') | Input::Delete => {
-                if self.cx < self.cur_line_len() {
-                    let before = (self.cx, self.cy);
-                    let ch = self.lines[self.cy].remove(self.cx);
-                    self.register = Some(Register::Chars(vec![ch]));
-                    self.commit(
-                        before,
-                        vec![Change::Delete {
-                            line: before.1,
-                            col: before.0,
-                            text: vec![ch],
-                        }],
-                    );
-                }
+                self.delete_chars(count);
             }
             Input::Char('d') => {
                 self.pending_d = true;
                 self.pending_y = false;
+                self.count = Some(count); // survive to the second `d`
             }
             Input::Char('y') => {
                 self.pending_y = true;
                 self.pending_d = false;
+                self.count = Some(count);
             }
-            Input::Char('p') => self.paste(false),
-            Input::Char('P') => self.paste(true),
+            Input::Char('p') => self.paste(false, count),
+            Input::Char('P') => self.paste(true, count),
             Input::Char('u') => self.undo(),
             Input::Ctrl('r') => self.redo(),
+            Input::Char('g') => {
+                self.pending_g = true;
+                self.pending_d = false;
+                self.pending_y = false;
+                self.count = Some(count);
+            }
+            Input::Char('v') => {
+                self.mode = Mode::Visual;
+                self.visual_anchor = (self.cx, self.cy);
+                self.set_status(String::from("-- VISUAL -- (Esc to exit)"));
+            }
             Input::Char(':') => {
                 self.mode = Mode::Command;
                 self.command.clear();
@@ -482,7 +544,8 @@ impl Editor {
             Input::Esc => {
                 self.pending_d = false;
                 self.pending_y = false;
-                self.open_line_pending = false;
+                self.pending_g = false;
+                self.count = None;
             }
             Input::Ctrl('c') => {
                 self.set_status(String::from("Type :q to quit (or :q! to force)"));
@@ -490,6 +553,77 @@ impl Editor {
             _ => {}
         }
         Effect::None
+    }
+
+    /// Delete up to `n` characters at the cursor (one transaction).
+    fn delete_chars(&mut self, n: usize) {
+        let len = self.cur_line_len();
+        if self.cx >= len {
+            return;
+        }
+        let n = n.min(len - self.cx);
+        let before = (self.cx, self.cy);
+        let text: Vec<char> = self.lines[self.cy].drain(self.cx..self.cx + n).collect();
+        self.register = Some(Register::Chars(text.clone()));
+        self.commit(
+            before,
+            vec![Change::Delete {
+                line: before.1,
+                col: before.0,
+                text,
+            }],
+        );
+    }
+
+    /// Delete `n` lines starting at the cursor (one transaction).
+    fn delete_lines(&mut self, n: usize) {
+        let before = (self.cx, self.cy);
+        if self.lines.len() > 1 {
+            let n = n.min(self.lines.len() - self.cy).max(1);
+            let mut changes = Vec::with_capacity(n);
+            let mut removed = Vec::with_capacity(n);
+            for _ in 0..n {
+                let content = self.lines.remove(self.cy);
+                changes.push(Change::LineDelete {
+                    index: self.cy,
+                    line: content.clone(),
+                });
+                removed.push(content);
+            }
+            self.cy = self.cy.min(self.lines.len() - 1);
+            self.cx = self.cx.min(self.cur_line_len().saturating_sub(1));
+            self.register = Some(Register::Lines(removed));
+            self.commit(before, changes);
+        } else {
+            // Single line: empty it instead (vim behaviour).
+            let content = self.lines[0].clone();
+            self.lines[0].clear();
+            self.cy = 0;
+            self.cx = 0;
+            self.register = Some(Register::Lines(vec![content.clone()]));
+            self.commit(
+                before,
+                vec![Change::Delete {
+                    line: 0,
+                    col: 0,
+                    text: content,
+                }],
+            );
+        }
+    }
+
+    /// Yank `n` lines starting at the cursor.
+    fn yank_lines(&mut self, n: usize) {
+        let n = n.min(self.lines.len() - self.cy).max(1);
+        let lines: Vec<Vec<char>> = self.lines[self.cy..self.cy + n].to_vec();
+        let text: String = lines
+            .iter()
+            .map(|l| l.iter().collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.register = Some(Register::Lines(lines));
+        self.set_clipboard(text);
+        self.set_status(format!("Yanked {} line(s) (also copied via OSC 52)", n));
     }
 
     fn page_height(&self) -> usize {
@@ -836,18 +970,7 @@ impl Editor {
         }
     }
 
-    fn yank_line(&mut self) {
-        let line = self.lines[self.cy].clone();
-        let text: String = line.iter().collect();
-        self.register = Some(Register::Lines(vec![line]));
-        self.set_clipboard(text);
-        self.set_status(format!(
-            "Yanked line {} (also copied via OSC 52)",
-            self.cy + 1
-        ));
-    }
-
-    fn paste(&mut self, before: bool) {
+    fn paste(&mut self, before: bool, count: usize) {
         let reg = match &self.register {
             Some(r) => r.clone(),
             None => {
@@ -858,26 +981,28 @@ impl Editor {
         let before_pos = (self.cx, self.cy);
         match reg {
             Register::Lines(lines) => {
-                let n = lines.len();
                 let start = if before { self.cy } else { self.cy + 1 };
-                for (i, l) in lines.iter().enumerate() {
-                    self.lines.insert(start + i, l.clone());
+                let mut changes: Vec<Change> = Vec::new();
+                for rep in 0..count {
+                    for (i, l) in lines.iter().enumerate() {
+                        let index = start + rep * lines.len() + i;
+                        self.lines.insert(index, l.clone());
+                        changes.push(Change::LineInsert {
+                            index,
+                            line: l.clone(),
+                        });
+                    }
                 }
-                let changes: Vec<Change> = lines
-                    .iter()
-                    .enumerate()
-                    .map(|(i, l)| Change::LineInsert {
-                        index: start + i,
-                        line: l.clone(),
-                    })
-                    .collect();
+                let pasted = lines.len() * count;
                 self.cy = start;
                 self.cx = 0;
                 self.commit(before_pos, changes);
-                self.set_status(format!("Pasted {n} line(s)"));
+                self.set_status(format!("Pasted {pasted} line(s)"));
             }
             Register::Chars(chars) => {
-                let n = chars.len();
+                // Charwise registers may span lines (visual yank): split on
+                // newlines and splice accordingly.
+                let text: String = chars.iter().collect::<String>().repeat(count);
                 let len = self.cur_line_len();
                 let col = if before {
                     self.cx
@@ -887,19 +1012,230 @@ impl Editor {
                 } else {
                     0
                 };
-                self.lines[self.cy].splice(col..col, chars.iter().copied());
+                if text.contains('\n') {
+                    let parts: Vec<&str> = text.split('\n').collect();
+                    self.paste_multiline((col, before_pos.1), &parts);
+                    self.set_status(format!("Pasted {} line(s)", parts.len()));
+                    return;
+                }
+                let n = chars.len() * count;
+                let text_chars: Vec<char> = text.chars().collect();
+                self.lines[self.cy].splice(col..col, text_chars.iter().copied());
                 self.cx = col + n;
                 self.commit(
                     before_pos,
                     vec![Change::Insert {
                         line: before_pos.1,
                         col,
-                        text: chars,
+                        text: text_chars,
                     }],
                 );
                 self.set_status(format!("Pasted {n} char(s)"));
             }
         }
+    }
+
+    /// Splice multi-line charwise text at `at`: the current line keeps its
+    /// head, the tail moves below the pasted block (vim semantics).
+    fn paste_multiline(&mut self, at: (usize, usize), parts: &[&str]) {
+        let (line, col) = (at.1, at.0);
+        let post: Vec<char> = self.lines[line][col..].to_vec();
+        let pre_head: Vec<char> = parts[0].chars().collect();
+        let mut changes: Vec<Change> = Vec::new();
+        if !post.is_empty() {
+            self.lines[line].drain(col..);
+            changes.push(Change::Delete {
+                line,
+                col,
+                text: post.clone(),
+            });
+        }
+        if !pre_head.is_empty() {
+            for (i, c) in pre_head.iter().enumerate() {
+                self.lines[line].insert(col + i, *c);
+            }
+            changes.push(Change::Insert {
+                line,
+                col,
+                text: pre_head,
+            });
+        }
+        for (i, part) in parts[1..].iter().enumerate() {
+            let mut content: Vec<char> = part.chars().collect();
+            if i == parts.len() - 2 {
+                content.extend(post.iter().copied());
+            }
+            let index = line + 1 + i;
+            self.lines.insert(index, content.clone());
+            changes.push(Change::LineInsert {
+                index,
+                line: content,
+            });
+        }
+        self.cy = line + parts.len() - 1;
+        self.cx = 0;
+        if parts.len() == 1 {
+            // No newlines: tail stays on the same line after the head.
+            self.cy = line;
+            self.cx = col + parts[0].chars().count();
+        }
+        self.commit(at, changes);
+    }
+
+    // ------------------------------------------------------------------
+    // Visual mode
+    // ------------------------------------------------------------------
+
+    /// Normalized charwise selection: (start, end) inclusive, start <= end.
+    /// The cursor cell is part of the selection (vim charwise).
+    pub fn visual_range(&self) -> ((usize, usize), (usize, usize)) {
+        let a = (self.visual_anchor.1, self.visual_anchor.0); // (y, x)
+        let c = (self.cy, self.cx);
+        let start = a.min(c);
+        let end = a.max(c);
+        let clamp = |mut p: (usize, usize)| {
+            p.0 = p.0.min(self.lines.len() - 1);
+            let len = self.lines[p.0].len();
+            p.1 = p.1.min(if len == 0 { 0 } else { len - 1 });
+            p
+        };
+        (clamp(start), clamp(end))
+    }
+
+    /// Selection for the renderer: (y0, x0, y1, x1) inclusive, or None when
+    /// visual mode is off.
+    pub fn visual_selection(&self) -> Option<(usize, usize, usize, usize)> {
+        if self.mode != Mode::Visual {
+            return None;
+        }
+        let ((y0, x0), (y1, x1)) = self.visual_range();
+        Some((y0, x0, y1, x1))
+    }
+
+    fn visual_input(&mut self, input: Input) -> Effect {
+        let zero_motion = input == Input::Char('0') && self.count.is_none();
+        if !zero_motion && self.count_digit(input) {
+            return Effect::None;
+        }
+        let count = self.count.take().unwrap_or(1);
+        if self.apply_motion(input, count) {
+            return Effect::None;
+        }
+
+        match input {
+            Input::Char('d') | Input::Char('x') => self.delete_selection(),
+            Input::Char('y') => self.yank_selection(),
+            Input::Char('o') => {
+                // Swap anchor and cursor (cursor jumps to the other end).
+                let cur = (self.cx, self.cy);
+                self.cx = self.visual_anchor.0;
+                self.cy = self.visual_anchor.1;
+                self.visual_anchor = cur;
+            }
+            Input::Esc | Input::Char('v') | Input::Ctrl('c') => {
+                self.mode = Mode::Normal;
+                self.count = None;
+                self.pending_g = false;
+            }
+            Input::Char(':') => {
+                self.mode = Mode::Command;
+                self.command.clear();
+            }
+            Input::Char('/') => {
+                self.mode = Mode::Search;
+                self.search_term.clear();
+            }
+            _ => {}
+        }
+        Effect::None
+    }
+
+    fn exit_visual(&mut self) {
+        self.mode = Mode::Normal;
+        self.count = None;
+    }
+
+    /// Full selected text, lines joined with `\n`.
+    fn selection_text(&self) -> String {
+        let ((y0, x0), (y1, x1)) = self.visual_range();
+        if y0 == y1 {
+            return self.lines[y0][x0..=x1].iter().collect();
+        }
+        let mut parts: Vec<String> = Vec::new();
+        parts.push(self.lines[y0][x0..].iter().collect());
+        for l in &self.lines[y0 + 1..y1] {
+            parts.push(l.iter().collect());
+        }
+        parts.push(self.lines[y1][..=x1].iter().collect());
+        parts.join("\n")
+    }
+
+    fn yank_selection(&mut self) {
+        let text = self.selection_text();
+        // Charwise yanks spanning lines stay charwise (paste re-splits).
+        let lines: Vec<Vec<char>> = text.split('\n').map(|p| p.chars().collect()).collect();
+        if lines.len() == 1 {
+            self.register = Some(Register::Chars(lines.into_iter().next().unwrap()));
+        } else {
+            // stored as chars including the newlines; paste re-splits
+            self.register = Some(Register::Chars(text.chars().collect()));
+        }
+        self.set_clipboard(text.clone());
+        self.set_status(format!(
+            "Yanked {} char(s) (also copied via OSC 52)",
+            text.chars().count()
+        ));
+        self.exit_visual();
+    }
+
+    fn delete_selection(&mut self) {
+        let ((y0, x0), (y1, x1)) = self.visual_range();
+        let text = self.selection_text();
+        let before = (self.cx, self.cy);
+        let mut changes: Vec<Change> = Vec::new();
+
+        if y0 == y1 {
+            if x1 < self.lines[y0].len() {
+                let removed: Vec<char> = self.lines[y0].drain(x0..=x1).collect();
+                changes.push(Change::Delete {
+                    line: y0,
+                    col: x0,
+                    text: removed,
+                });
+            }
+        } else {
+            let tail: Vec<char> = self.lines[y0].drain(x0..).collect();
+            changes.push(Change::Delete {
+                line: y0,
+                col: x0,
+                text: tail,
+            });
+            // Capture the last line's remainder before its line is removed.
+            let remainder: Vec<char> = self.lines[y1][x1 + 1..].to_vec();
+            for _ in y0 + 1..=y1 {
+                let content = self.lines.remove(y0 + 1);
+                changes.push(Change::LineDelete {
+                    index: y0 + 1,
+                    line: content,
+                });
+            }
+            // Join the remainder onto the first line.
+            if !remainder.is_empty() {
+                self.lines[y0].extend(remainder.iter().copied());
+                changes.push(Change::Insert {
+                    line: y0,
+                    col: x0,
+                    text: remainder,
+                });
+            }
+        }
+
+        self.register = Some(Register::Chars(text.chars().collect()));
+        self.cy = y0;
+        self.cx = x0.min(self.cur_line_len().saturating_sub(1));
+        self.clamp_cursor();
+        self.commit(before, changes);
+        self.exit_visual();
     }
 
     // ------------------------------------------------------------------
@@ -1248,37 +1584,6 @@ impl Editor {
             .max(16)
     }
 
-    fn delete_line(&mut self) {
-        let before = (self.cx, self.cy);
-        let old_content = self.lines[self.cy].clone();
-        if self.lines.len() > 1 {
-            let index = self.cy;
-            self.lines.remove(index);
-            self.cy = self.cy.min(self.lines.len() - 1);
-            self.cx = 0;
-            self.commit(
-                before,
-                vec![Change::LineDelete {
-                    index,
-                    line: old_content.clone(),
-                }],
-            );
-        } else {
-            self.lines[0].clear();
-            self.cy = 0;
-            self.cx = 0;
-            self.commit(
-                before,
-                vec![Change::Delete {
-                    line: 0,
-                    col: 0,
-                    text: old_content.clone(),
-                }],
-            );
-        }
-        self.register = Some(Register::Lines(vec![old_content]));
-    }
-
     // ------------------------------------------------------------------
     // Scrolling
     // ------------------------------------------------------------------
@@ -1306,7 +1611,7 @@ impl Editor {
 }
 
 pub const WELCOME: &str =
-    "HELP: i insert | dd delete | yy copy | p paste | u undo | / search | :w save | :q quit | :q! force";
+    "HELP: i insert | v select | dd delete | yy copy | p paste | u undo | / search | :s/a/b/ replace | :w save | :q quit";
 
 // ----------------------------------------------------------------------
 // Buffer parsing / display-width helpers
