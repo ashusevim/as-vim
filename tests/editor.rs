@@ -891,3 +891,193 @@ fn yank_clipboard_skips_huge_payloads() {
     e.handle_input(Input::Char('y'));
     assert!(e.take_clipboard().is_none()); // > 100 KB cap
 }
+
+// ----------------------------------------------------------------------
+// v0.4 — :s / :%s substitute
+// ----------------------------------------------------------------------
+
+fn colon_cmd(e: &mut Editor, cmd: &str) -> Effect {
+    e.handle_input(Input::Char(':'));
+    for c in cmd.chars() {
+        e.handle_input(Input::Char(c));
+    }
+    e.handle_input(Input::Enter)
+}
+
+#[test]
+fn substitute_first_occurrence_on_current_line() {
+    let mut e = ed_with("cat catalog cat");
+    colon_cmd(&mut e, "s/cat/dog/");
+    assert_eq!(text(&e), "dog catalog cat");
+}
+
+#[test]
+fn substitute_global_flag() {
+    let mut e = ed_with("cat catalog cat");
+    colon_cmd(&mut e, "s/cat/dog/g");
+    assert_eq!(text(&e), "dog dogalog dog");
+}
+
+#[test]
+fn substitute_is_one_undo_step() {
+    let mut e = ed_with("aa\naa");
+    colon_cmd(&mut e, "%s/aa/bb/g");
+    assert_eq!(text(&e), "bb\nbb");
+    e.handle_input(Input::Char('u'));
+    assert_eq!(text(&e), "aa\naa");
+    e.handle_input(Input::Ctrl('r'));
+    assert_eq!(text(&e), "bb\nbb");
+}
+
+#[test]
+fn substitute_all_lines_percent() {
+    let mut e = ed_with("x = 1\ny = 2\nx = 3");
+    colon_cmd(&mut e, "%s/x/z/g");
+    assert_eq!(text(&e), "z = 1\ny = 2\nz = 3");
+}
+
+#[test]
+fn substitute_empty_replacement_deletes() {
+    let mut e = ed_with("foo barfoo");
+    colon_cmd(&mut e, "%s/foo//g");
+    assert_eq!(text(&e), " bar");
+}
+
+#[test]
+fn substitute_reuses_last_search_when_old_empty() {
+    let mut e = ed_with("loop loop");
+    feed(
+        &mut e,
+        &[Input::Char('/'), Input::Char('o'), Input::Char('p')],
+    );
+    e.handle_input(Input::Enter);
+    // edit clears highlight but not last_search
+    e.handle_input(Input::Char('x')); // "loop loop" -> "lop loop"
+    colon_cmd(&mut e, "s//OP/g");
+    assert_eq!(text(&e), "lOP loOP");
+}
+
+#[test]
+fn substitute_smartcase() {
+    let mut e = ed_with("Hello hello HELLO");
+    colon_cmd(&mut e, "%s/hello/X/g"); // lowercase term: case-insensitive
+    assert_eq!(text(&e), "X X X");
+    let mut e2 = ed_with("Hello hello HELLO");
+    colon_cmd(&mut e2, "%s/HELLO/X/g"); // uppercase term: case-sensitive
+    assert_eq!(text(&e2), "Hello hello X");
+}
+
+#[test]
+fn substitute_escaped_slash() {
+    let mut e = ed_with("a/b c");
+    colon_cmd(&mut e, "s/a\\/b/AB/");
+    assert_eq!(text(&e), "AB c");
+}
+
+#[test]
+fn substitute_no_match_reports_and_unchanged() {
+    let mut e = ed_with("hello");
+    colon_cmd(&mut e, "%s/zzz/q/g");
+    assert_eq!(text(&e), "hello");
+    assert!(e.status.contains("Pattern not found"));
+}
+
+#[test]
+fn substitute_usage_errors() {
+    let mut e = ed_with("x");
+    colon_cmd(&mut e, "s/nope");
+    assert!(e.status.contains("Usage"), "{}", e.status);
+    let mut e2 = ed_with("x");
+    colon_cmd(&mut e2, "s//y/"); // no previous search either
+    assert!(e2.status.contains("No previous search"));
+}
+
+#[test]
+fn substitute_reports_count_for_percent() {
+    let mut e = ed_with("ab ab\nab");
+    colon_cmd(&mut e, "%s/ab/X/g");
+    assert!(
+        e.status.contains("3 substitution(s) on 2 line(s)"),
+        "{}",
+        e.status
+    );
+}
+
+#[test]
+fn parse_substitute_cases() {
+    use as_vim::editor::Editor;
+    assert_eq!(
+        Editor::parse_substitute("/a/b/").unwrap(),
+        ("a".to_string(), "b".to_string(), false)
+    );
+    assert_eq!(
+        Editor::parse_substitute("/a/b/g").unwrap(),
+        ("a".to_string(), "b".to_string(), true)
+    );
+    assert_eq!(
+        Editor::parse_substitute("/a/b").unwrap(),
+        ("a".to_string(), "b".to_string(), false)
+    );
+    assert_eq!(
+        Editor::parse_substitute("/a\\/b/c\\\\d/").unwrap(),
+        ("a/b".to_string(), "c\\d".to_string(), false)
+    );
+    assert!(Editor::parse_substitute("a/b/").is_err());
+    assert!(Editor::parse_substitute("/a").is_err());
+}
+
+// ----------------------------------------------------------------------
+// v0.4 — search highlight clears on edit; status timeout
+// ----------------------------------------------------------------------
+
+#[test]
+fn search_highlight_clears_on_edit_and_returns_on_new_search() {
+    let mut e = ed_with("cat dog cat");
+    e.handle_input(Input::Char('/'));
+    for c in "cat".chars() {
+        e.handle_input(Input::Char(c));
+    }
+    e.handle_input(Input::Enter);
+    assert_eq!(e.search_ranges(0).len(), 2);
+    e.handle_input(Input::Char('x')); // any edit (deletes first 'c' -> "at dog cat")
+    assert!(
+        e.search_ranges(0).is_empty(),
+        "highlight must clear on edit"
+    );
+    // n still works after the edit and re-arms highlighting
+    e.handle_input(Input::Char('n'));
+    assert_eq!(e.search_ranges(0).len(), 1, "n re-arms highlighting");
+}
+
+#[test]
+fn transient_status_fades_help_persists() {
+    use std::time::Duration;
+    let mut e = ed(); // WELCOME is permanent
+    assert!(e.status.contains("HELP"));
+    assert!(!e.tick_status());
+    assert!(e.status.contains("HELP"));
+
+    e.status_timeout = Duration::ZERO;
+    e.handle_input(Input::Char('i')); // transient "-- INSERT --"
+    assert!(e.status.contains("INSERT"));
+    assert!(e.tick_status(), "transient status must clear once expired");
+    assert!(e.status.is_empty());
+    // second tick: nothing to clear
+    assert!(!e.tick_status());
+}
+
+#[test]
+fn undo_after_dd_on_last_line_restores_sane_cursor() {
+    // Regression guard: dd on the last line, then undo — cursor must land on
+    // the line that took the deleted one's place (vim behaviour), never panic.
+    let mut e = ed_with("a\nb\nc");
+    feed(
+        &mut e,
+        &[Input::Char('G'), Input::Char('d'), Input::Char('d')],
+    );
+    assert_eq!(text(&e), "a\nb");
+    assert_eq!(e.cy, 1);
+    e.handle_input(Input::Char('u'));
+    assert_eq!(text(&e), "a\nb\nc");
+    assert!(e.cy <= 2);
+}

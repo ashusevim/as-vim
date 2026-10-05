@@ -157,6 +157,10 @@ with open(os.path.join(WORK, "hscroll.txt"), "w") as f:
     f.write(("x" * 195) + "tail\n")
 with open(os.path.join(WORK, "crlf.txt"), "wb") as f:
     f.write(b"one\r\ntwo\r\n")
+with open(os.path.join(WORK, "sub.txt"), "w") as f:
+    f.write("one one\ntwo one\n")
+with open(os.path.join(WORK, "subline.txt"), "w") as f:
+    f.write("war peace peace\n")
 
 
 # ---------------------------------------------------------------- scenarios
@@ -610,6 +614,80 @@ def t_osc52(s):
 
 
 scenario("OSC52 clipboard", "osc.txt", t_osc52)
+
+def t_substitute(s):
+    s.pump(0.3)
+    s.type(":%s/one/1/g")
+    s.send("\r")
+    s.pump(0.3)
+    check("substitute: status count", "3 substitution(s) on 2 line(s)" in s.message_row(),
+          s.message_row())
+    s.type(":wq")
+    s.send("\r")
+
+scenario(":percent-s substitute", "sub.txt", t_substitute,
+         file_expect="1 1\ntwo 1\n")
+
+def t_substitute_line(s):
+    s.pump(0.3)
+    s.type(":s/war/peace/")
+    s.send("\r")
+    s.pump(0.3)
+    s.type(":wq")
+    s.send("\r")
+
+scenario(":s single line", "subline.txt", t_substitute_line,
+         file_expect="peace peace peace\n")
+
+def t_status_fade(s):
+    s.type("ihello")
+    s.type("\x1b")
+    s.type("yy")               # transient "Yanked line ..." message
+    s.pump(0.3)
+    check("status fade: message visible", "Yanked" in s.message_row(), s.message_row())
+    time.sleep(3.4)            # longer than the 3s timeout
+    s.type("j")                # any key redraws
+    s.pump(0.3)
+    check("status fade: message gone", "Yanked" not in s.message_row(), s.message_row())
+    s.type(":q!")
+    s.send("\r")
+
+scenario("transient status fades", "fade.txt", t_status_fade)
+
+def t_highlight_clears(s):
+    s.type("ione cat two cat")
+    s.type("\x1b")
+    s.type("gg0")
+    s.type("/cat")
+    s.send("\r")
+    s.pump(0.3)
+
+    def any_bg(sess):
+        has = any(
+            sess.screen.buffer[r][c].bg not in (None, "default")
+            for r in range(3)
+            for c in range(20)
+        )
+        return has, ""
+
+    check("highlight: bg after search", any_bg(s)[0])
+    s.type("x")                # edit -> highlight clears
+    s.pump(0.3)
+
+    def no_bg(sess):
+        has = any(
+            sess.screen.buffer[r][c].bg not in (None, "default")
+            for r in range(3)
+            for c in range(20)
+        )
+        return not has, ""
+    check("highlight: bg gone after edit", no_bg(s)[0])
+    s.type(":q!")
+    s.send("\r")
+
+scenario("search highlight clears on edit", "hl.txt", t_highlight_clears)
+
+# ---------------------------------------------------------------- run all
 
 # ---------------------------------------------------------------- run all
 

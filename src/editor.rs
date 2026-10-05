@@ -12,6 +12,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::syntax::Lang;
 
@@ -135,6 +136,12 @@ pub struct Editor {
     pub last_search: Option<String>,
     /// Message shown on the last terminal row.
     pub status: String,
+    /// Transient messages fade after `status_timeout`; help messages stay.
+    status_permanent: bool,
+    status_set_at: Option<Instant>,
+    pub status_timeout: Duration,
+    /// `/`-search matches are highlighted until the buffer is edited.
+    highlight_active: bool,
     pub screen_rows: usize,
     pub screen_cols: usize,
     /// First visible buffer row (vertical scroll).
@@ -178,6 +185,10 @@ impl Editor {
             search_term: String::new(),
             last_search: None,
             status: String::from(WELCOME),
+            status_permanent: true,
+            status_set_at: None,
+            status_timeout: Duration::from_secs(3),
+            highlight_active: false,
             screen_rows,
             screen_cols,
             row_off: 0,
@@ -202,10 +213,14 @@ impl Editor {
         match fs::read_to_string(path) {
             Ok(content) => {
                 ed.lines = split_lines(&content);
-                ed.status = format!("Opened {} ({} lines)", path.display(), ed.lines.len());
+                ed.set_status(format!(
+                    "Opened {} ({} lines)",
+                    path.display(),
+                    ed.lines.len()
+                ));
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                ed.status = format!("New file: {}", path.display());
+                ed.set_status(format!("New file: {}", path.display()));
             }
             Err(e) => return Err(e),
         }
@@ -236,6 +251,33 @@ impl Editor {
     /// the undo stack, so undoing back to the saved state also clears it.
     pub fn dirty(&self) -> bool {
         self.undo_stack.len() != self.saved_undo_len
+    }
+
+    /// Show a transient message on the status line (fades after
+    /// [`Editor::status_timeout`]).
+    pub fn set_status(&mut self, msg: impl Into<String>) {
+        self.status = msg.into();
+        self.status_permanent = false;
+        self.status_set_at = Some(Instant::now());
+    }
+
+    /// Clear the status message if it is a transient one whose time is up.
+    /// Returns true when the message changed (caller should redraw).
+    pub fn tick_status(&mut self) -> bool {
+        if self.status_permanent || self.status.is_empty() {
+            return false;
+        }
+        let expired = self
+            .status_set_at
+            .map(|t| t.elapsed() >= self.status_timeout)
+            .unwrap_or(false);
+        if expired {
+            self.status.clear();
+            self.status_set_at = None;
+            true
+        } else {
+            false
+        }
     }
 
     /// In NORMAL mode the cursor sits on an existing character (vim-style),
@@ -345,19 +387,19 @@ impl Editor {
             }
             Input::Char('i') => {
                 self.mode = Mode::Insert;
-                self.status = String::from("-- INSERT -- (Esc for NORMAL)");
+                self.set_status(String::from("-- INSERT -- (Esc for NORMAL)"));
             }
             Input::Char('a') => {
                 if self.cur_line_len() > 0 {
                     self.cx += 1;
                 }
                 self.mode = Mode::Insert;
-                self.status = String::from("-- INSERT -- (Esc for NORMAL)");
+                self.set_status(String::from("-- INSERT -- (Esc for NORMAL)"));
             }
             Input::Char('A') => {
                 self.cx = self.cur_line_len();
                 self.mode = Mode::Insert;
-                self.status = String::from("-- INSERT -- (Esc for NORMAL)");
+                self.set_status(String::from("-- INSERT -- (Esc for NORMAL)"));
             }
             Input::Char('o') => {
                 let before = (self.cx, self.cy);
@@ -379,7 +421,7 @@ impl Editor {
                     tx.after = (0, index);
                 }
                 self.open_line_pending = true;
-                self.status = String::from("-- INSERT -- (Esc for NORMAL)");
+                self.set_status(String::from("-- INSERT -- (Esc for NORMAL)"));
             }
             Input::Char('O') => {
                 let before = (self.cx, self.cy);
@@ -398,7 +440,7 @@ impl Editor {
                     tx.after = (0, index);
                 }
                 self.open_line_pending = true;
-                self.status = String::from("-- INSERT -- (Esc for NORMAL)");
+                self.set_status(String::from("-- INSERT -- (Esc for NORMAL)"));
             }
             Input::Char('x') | Input::Delete => {
                 if self.cx < self.cur_line_len() {
@@ -443,7 +485,7 @@ impl Editor {
                 self.open_line_pending = false;
             }
             Input::Ctrl('c') => {
-                self.status = String::from("Type :q to quit (or :q! to force)");
+                self.set_status(String::from("Type :q to quit (or :q! to force)"));
             }
             _ => {}
         }
@@ -458,7 +500,7 @@ impl Editor {
         match input {
             Input::Esc | Input::Ctrl('c') => {
                 self.mode = Mode::Normal;
-                self.status = String::from(WELCOME);
+                self.set_status(String::from(WELCOME));
                 self.open_line_pending = false;
                 // Vim behaviour: leaving INSERT moves the cursor off the
                 // past-the-end position back onto the last character.
@@ -663,6 +705,8 @@ impl Editor {
         }
         let after = (self.cx, self.cy);
         self.redo_stack.clear();
+        // Editing the buffer clears `/`-search highlighting (vim hlsearch).
+        self.highlight_active = false;
 
         if !self.coalesce_barrier && changes.len() == 1 {
             if let Some(last) = self.undo_stack.last_mut() {
@@ -709,7 +753,7 @@ impl Editor {
 
     pub fn undo(&mut self) {
         let Some(tx) = self.undo_stack.pop() else {
-            self.status = String::from("Already at oldest change");
+            self.set_status(String::from("Already at oldest change"));
             return;
         };
         for change in tx.changes.iter().rev() {
@@ -717,12 +761,12 @@ impl Editor {
         }
         (self.cx, self.cy) = tx.before;
         self.redo_stack.push(tx.clone());
-        self.status = format!("Undid {} change(s)", tx.changes.len());
+        self.set_status(format!("Undid {} change(s)", tx.changes.len()));
     }
 
     pub fn redo(&mut self) {
         let Some(tx) = self.redo_stack.pop() else {
-            self.status = String::from("Already at newest change");
+            self.set_status(String::from("Already at newest change"));
             return;
         };
         for change in &tx.changes {
@@ -734,7 +778,7 @@ impl Editor {
             self.undo_stack.remove(0);
             self.saved_undo_len = self.saved_undo_len.saturating_sub(1);
         }
-        self.status = format!("Redid {} change(s)", tx.changes.len());
+        self.set_status(format!("Redid {} change(s)", tx.changes.len()));
     }
 
     fn apply(&mut self, change: &Change) {
@@ -797,14 +841,17 @@ impl Editor {
         let text: String = line.iter().collect();
         self.register = Some(Register::Lines(vec![line]));
         self.set_clipboard(text);
-        self.status = format!("Yanked line {} (also copied via OSC 52)", self.cy + 1);
+        self.set_status(format!(
+            "Yanked line {} (also copied via OSC 52)",
+            self.cy + 1
+        ));
     }
 
     fn paste(&mut self, before: bool) {
         let reg = match &self.register {
             Some(r) => r.clone(),
             None => {
-                self.status = String::from("Nothing to paste");
+                self.set_status(String::from("Nothing to paste"));
                 return;
             }
         };
@@ -827,7 +874,7 @@ impl Editor {
                 self.cy = start;
                 self.cx = 0;
                 self.commit(before_pos, changes);
-                self.status = format!("Pasted {n} line(s)");
+                self.set_status(format!("Pasted {n} line(s)"));
             }
             Register::Chars(chars) => {
                 let n = chars.len();
@@ -850,7 +897,7 @@ impl Editor {
                         text: chars,
                     }],
                 );
-                self.status = format!("Pasted {n} char(s)");
+                self.set_status(format!("Pasted {n} char(s)"));
             }
         }
     }
@@ -889,6 +936,11 @@ impl Editor {
 
     /// Match ranges (start, end) in buffer line `line_idx`, for highlighting.
     pub fn search_ranges(&self, line_idx: usize) -> Vec<(usize, usize)> {
+        // Matches highlight from the moment a search runs until the buffer
+        // is edited (vim hlsearch behaviour).
+        if !self.highlight_active {
+            return Vec::new();
+        }
         let Some(term) = &self.last_search else {
             return Vec::new();
         };
@@ -906,12 +958,13 @@ impl Editor {
     /// wrapping around the buffer.
     fn jump_to_match(&mut self, forward: bool) {
         let Some(term) = self.last_search.clone() else {
-            self.status = String::from("No previous search");
+            self.set_status(String::from("No previous search"));
             return;
         };
         if term.is_empty() {
             return;
         }
+        self.highlight_active = true;
         let n = self.lines.len();
         let cx = self.cx;
         // Current line: respect direction relative to the cursor. Other
@@ -954,10 +1007,10 @@ impl Editor {
             Some((y, x)) => {
                 self.cy = y;
                 self.cx = x;
-                self.status = format!("/{}", term);
+                self.set_status(format!("/{}", term));
             }
             None => {
-                self.status = format!("Pattern not found: {}", term);
+                self.set_status(format!("Pattern not found: {}", term));
             }
         }
     }
@@ -968,6 +1021,14 @@ impl Editor {
 
     fn execute_command(&mut self) -> Effect {
         let cmd = self.command.trim().to_string();
+        // Substitute commands contain the delimiter in the head itself
+        // (`s/../../g`), so they're matched before whitespace tokenizing.
+        if cmd == "s" || cmd.starts_with("s/") {
+            return self.substitute_cmd(&cmd, false);
+        }
+        if cmd.starts_with("%s/") {
+            return self.substitute_cmd(&cmd, true);
+        }
         let mut tokens = cmd.split_whitespace();
         let head = tokens.next().unwrap_or("").to_string();
         let arg: Option<String> = tokens.next().map(|s| s.to_string());
@@ -976,7 +1037,9 @@ impl Editor {
             ("w", arg) => self.save_cmd(arg),
             ("q", None) => {
                 if self.dirty() {
-                    self.status = String::from("No write since last change (add ! to override)");
+                    self.set_status(String::from(
+                        "No write since last change (add ! to override)",
+                    ));
                     Effect::None
                 } else {
                     Effect::Quit
@@ -999,12 +1062,137 @@ impl Editor {
                 self.redo();
                 Effect::None
             }
+            ("s", _) | ("%s", _) => self.substitute_cmd(&cmd, head == "%s"),
             ("", _) => Effect::None, // bare `:` + Enter
             _ => {
-                self.status = format!("Not an editor command: {cmd}");
+                self.set_status(format!("Not an editor command: {cmd}"));
                 Effect::None
             }
         }
+    }
+
+    /// Parse `s/old/new/flags` (or `%s/...`). Returns (old, new, global).
+    /// `\/` and `\\` are unescaped in both parts; an empty `old` reuses the
+    /// last `/`-search term.
+    pub fn parse_substitute(body: &str) -> Result<(String, String, bool), String> {
+        let mut chars = body.chars().peekable();
+        if chars.next() != Some('/') {
+            return Err(String::from("Usage: s/old/new/ (or :%s/old/new/g)"));
+        }
+        let mut part = String::new();
+        let mut parts: Vec<String> = Vec::new();
+        let mut escaped = false;
+        for c in chars {
+            if escaped {
+                match c {
+                    '/' => part.push('/'),
+                    '\\' => part.push('\\'),
+                    other => {
+                        part.push('\\');
+                        part.push(other);
+                    }
+                }
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '/' {
+                parts.push(std::mem::take(&mut part));
+            } else {
+                part.push(c);
+            }
+        }
+        if escaped {
+            part.push('\\');
+        }
+        parts.push(part); // replacement (may lack trailing '/')
+
+        match parts.len() {
+            1 => Err(String::from("Usage: s/old/new/")),
+            _ => {
+                let global = parts.len() > 2 && parts[2].contains('g');
+                Ok((parts[0].clone(), parts[1].clone(), global))
+            }
+        }
+    }
+
+    fn substitute_cmd(&mut self, cmd: &str, all_lines: bool) -> Effect {
+        let body = cmd
+            .trim()
+            .strip_prefix(if all_lines { "%s" } else { "s" })
+            .unwrap_or("");
+        let (old, new, global) = match Self::parse_substitute(body) {
+            Ok(parsed) => parsed,
+            Err(msg) => {
+                self.set_status(msg);
+                return Effect::None;
+            }
+        };
+        // Empty pattern: reuse the last search (vim behaviour).
+        let old = if old.is_empty() {
+            match &self.last_search {
+                Some(t) if !t.is_empty() => t.clone(),
+                _ => {
+                    self.set_status(String::from("No previous search"));
+                    return Effect::None;
+                }
+            }
+        } else {
+            old
+        };
+
+        let before = (self.cx, self.cy);
+        let mut changes: Vec<Change> = Vec::new();
+        let mut hits = 0usize;
+        let mut hit_lines = 0usize;
+
+        let line_range: Vec<usize> = if all_lines {
+            (0..self.lines.len()).collect()
+        } else {
+            vec![self.cy]
+        };
+
+        for line_idx in line_range {
+            let mut spans = Self::find_matches(&self.lines[line_idx], &old);
+            if !global {
+                spans.truncate(1);
+            }
+            if spans.is_empty() {
+                continue;
+            }
+            hits += spans.len();
+            hit_lines += 1;
+            // Right-to-left keeps earlier match positions valid.
+            let new_chars: Vec<char> = new.chars().collect();
+            for start in spans.into_iter().rev() {
+                let old_chars: Vec<char> = old.chars().collect();
+                changes.push(Change::Delete {
+                    line: line_idx,
+                    col: start,
+                    text: old_chars,
+                });
+                changes.push(Change::Insert {
+                    line: line_idx,
+                    col: start,
+                    text: new_chars.clone(),
+                });
+            }
+        }
+
+        if changes.is_empty() {
+            self.set_status(format!("E486: Pattern not found: {old}"));
+            return Effect::None;
+        }
+
+        for change in &changes {
+            self.apply(change);
+        }
+        self.clamp_cursor();
+        self.commit(before, changes);
+        self.highlight_active = false;
+        if all_lines {
+            self.set_status(format!("{hits} substitution(s) on {hit_lines} line(s)"));
+        }
+        Effect::None
     }
 
     fn save_cmd(&mut self, arg: Option<String>) -> Effect {
@@ -1018,18 +1206,22 @@ impl Editor {
             None => match &self.file_path {
                 Some(p) => p.clone(),
                 None => {
-                    self.status = String::from("No file name: use :w <filename>");
+                    self.set_status(String::from("No file name: use :w <filename>"));
                     return Effect::None;
                 }
             },
         };
         match self.save_to(&path) {
             Ok(()) => {
-                self.status = format!("Wrote {} lines to {}", self.lines.len(), path.display());
+                self.set_status(format!(
+                    "Wrote {} lines to {}",
+                    self.lines.len(),
+                    path.display()
+                ));
                 Effect::Saved(path)
             }
             Err(e) => {
-                self.status = format!("Error saving {}: {e}", path.display());
+                self.set_status(format!("Error saving {}: {e}", path.display()));
                 Effect::None
             }
         }

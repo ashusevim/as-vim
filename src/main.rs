@@ -13,8 +13,10 @@ use crossterm::terminal::{
 };
 
 use as_vim::editor::{Editor, Effect};
-use as_vim::input::{read_terminal_event, TerminalEvent};
+use as_vim::input::{poll_event, read_terminal_event, TerminalEvent};
 use as_vim::ui;
+
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(
@@ -63,13 +65,13 @@ fn run(cli: &Cli, stdout: &mut io::Stdout) -> io::Result<()> {
     ui::refresh_screen(stdout, &mut ed)?;
 
     loop {
-        match read_terminal_event()? {
-            TerminalEvent::Resize => {
+        match poll_event(Duration::from_millis(200))? {
+            Some(TerminalEvent::Resize) => {
                 let (c, r) = size()?;
                 ed.screen_rows = r as usize;
                 ed.screen_cols = c as usize;
             }
-            TerminalEvent::Input(input) => {
+            Some(TerminalEvent::Input(input)) => {
                 if ed.handle_input(input) == Effect::Quit {
                     return Ok(());
                 }
@@ -78,6 +80,13 @@ fn run(cli: &Cli, stdout: &mut io::Stdout) -> io::Result<()> {
                     let b64 = as_vim::editor::base64_encode(text.as_bytes());
                     write!(stdout, "\x1b]52;c;{b64}\x07")?;
                 }
+            }
+            // Idle tick: fade transient status messages.
+            None => {
+                if ed.tick_status() {
+                    ui::refresh_screen(stdout, &mut ed)?;
+                }
+                continue;
             }
         }
         ui::refresh_screen(stdout, &mut ed)?;
